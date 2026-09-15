@@ -9,6 +9,10 @@
             "options": {
                 "cwd": "${workspaceFolder}"
             },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            },
             "problemMatcher": []
         },
         {
@@ -25,6 +29,12 @@
                 "kind": "build",
                 "isDefault": true
             },
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "echo": true
+            },
             "problemMatcher": "$gcc"
         },
         {
@@ -34,6 +44,10 @@
             "args": ["-S", ".", "-B", "build-console", "-G", "Ninja", "-DBUILD_GUI=OFF", "-DBUILD_TESTS=ON"],
             "options": {
                 "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
             },
             "problemMatcher": []
         },
@@ -47,6 +61,12 @@
             },
             "dependsOn": ["配置 CMake（离线构建目录，不拉 raylib）"],
             "dependsOrder": "sequence",
+            "presentation": {
+                "reveal": "always",
+                "panel": "shared",
+                "clear": true,
+                "echo": true
+            },
             "problemMatcher": "$gcc"
         },
         {
@@ -58,6 +78,11 @@
             },
             "dependsOn": ["构建：全部（GUI + 控制台 + 测试）"],
             "dependsOrder": "sequence",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
             "problemMatcher": []
         },
         {
@@ -69,6 +94,11 @@
             },
             "dependsOn": ["构建：全部（GUI + 控制台 + 测试）"],
             "dependsOrder": "sequence",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
             "problemMatcher": []
         },
         {
@@ -80,6 +110,11 @@
             },
             "dependsOn": ["构建：全部（GUI + 控制台 + 测试）"],
             "dependsOrder": "sequence",
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "clear": true
+            },
             "problemMatcher": []
         }
     ]
