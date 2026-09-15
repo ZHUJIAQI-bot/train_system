@@ -1,0 +1,28 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: Build train_gui",
+            "type": "shell",
+            "command": "cmake --build D:/train_system/build-gui",
+            "options": {
+                "cwd": "D:/train_system"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "CMake: Run train_gui",
+            "type": "shell",
+            "command": "D:/train_system/build-gui/train_gui.exe",
+            "options": {
+                "cwd": "D:/train_system"
+            },
+            "dependsOn": "CMake: Build train_gui",
+            "problemMatcher": []
+        }
+    ]
+}

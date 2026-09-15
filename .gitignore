@@ -1,0 +1,38 @@
+# ============ 构建产物 ============
+# raylib 由 CMake FetchContent 自动拉取，不需要入库（这也是体积最大的一块）
+build*/
+_deps/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CPackConfig.cmake
+compile_commands.json
+*.ninja
+.ninja_deps
+.ninja_log
+Makefile
+
+# ============ 编译输出 ============
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+output/
+
+# ============ 运行时数据 ============
+# 程序每次运行都会改写，入库只会制造无意义的 diff
+passengers.dat
+passengers.dat.tmp
+passengers.dat.bad-*
+
+# ============ 本地临时目录 ============
+backup/
+attic/
+
+# ============ 编辑器 / 系统 ============
+.vs/
+*.user
+Thumbs.db
+desktop.ini
