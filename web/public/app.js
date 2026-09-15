@@ -250,15 +250,12 @@
     const stationItems = options.stations.map((_, i) => ({
       value: i, label: i + '  ' + stationName(i)
     }));
-    const trainItems = options.trains.map((code) => {
-      const n = parseInt(code.slice(1), 10);
-      const northbound = n % 2 === 1;                  // 奇数车次 北京→上海
-      const hour = northbound ? 6 + (n - 1) / 2 : 6 + (n - 2) / 2;
-      const time = String(hour).padStart(2, '0') + (northbound ? ':00' : ':30');
+    // 方向与发车时间由 C 提供，前端不再自己推算（避免和模型层漂移）
+    const trainItems = options.trains.map((t) => {
       const dir = lang === 'zh'
-        ? (northbound ? '北京→上海' : '上海→北京')
-        : (northbound ? 'Beijing→Shanghai' : 'Shanghai→Beijing');
-      return { value: code, label: code + '  ' + dir + ' ' + time };
+        ? (t.northbound ? '北京→上海' : '上海→北京')
+        : (t.northbound ? 'Beijing→Shanghai' : 'Shanghai→Beijing');
+      return { value: t.code, label: t.code + '  ' + dir + ' ' + t.depart };
     });
     const dateItems = [];
     for (let i = 0; i < DATE_OPTIONS; i++) {
@@ -335,8 +332,9 @@
     if (f.board < 0 || f.alight < 0 || f.board === f.alight) {
       priceOut.textContent = '—';
     } else {
-      const seg = Math.abs(f.alight - f.board);
-      priceOut.textContent = fmt('price', { n: seg * 150 + (f.firstclass === 1 ? 100 : 0) });
+      // 走 C 的 calc_price，不在 JS 里重写计价规则
+      const res = JSON.parse(api.price(f.board, f.alight, f.firstclass));
+      priceOut.textContent = res.ok ? fmt('price', { n: res.price }) : '—';
     }
   }
 
@@ -548,6 +546,7 @@
       segments:   Module.cwrap('api_segments', 'string', ['string', 'string']),
       seatsLeft:  Module.cwrap('api_seats_left', 'string',
                     ['string', 'string', 'number', 'number', 'number']),
+      price:      Module.cwrap('api_price', 'string', ['number', 'number', 'number']),
       load:       Module.cwrap('api_load', 'string', ['string']),
       save:       Module.cwrap('api_save', 'string', ['string']),
       expire:     Module.cwrap('api_expire', 'string', ['string']),

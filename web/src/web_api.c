@@ -206,10 +206,24 @@ EMSCRIPTEN_KEEPALIVE const char *api_options(void) {
         if (i > 0) json_putc(',');
         json_escape(stations[i]);
     }
+    /* 车次连方向与发车时间一起返回，前端不要再自己推算 ——
+       这些规则属于业务逻辑，在 JS 里重写一份迟早会和 C 漂移。 */
     json_puts("],\"trains\":[");
     for (int i = 1; i <= TRAIN_COUNT; i++) {
+        char code[6];
+        char depart[6];
+        snprintf(code, sizeof(code), "G%d", i);
+        train_depart_time(i, depart);
         if (i > 1) json_putc(',');
-        json_appendf("\"G%d\"", i);
+        json_puts("{");
+        json_str_field("code", code);
+        json_puts(",");
+        json_int_field("number", i);
+        json_puts(",");
+        json_int_field("northbound", train_is_northbound(i));
+        json_puts(",");
+        json_str_field("depart", depart);
+        json_puts("}");
     }
     json_puts("],\"carriages\":[");
     for (int c = 1; c <= CARRIAGE_COUNT; c++) {
@@ -388,6 +402,21 @@ EMSCRIPTEN_KEEPALIVE const char *api_segments(const char *train_no, const char *
     return json_finish();
 }
 
+/* 票价查询：前端预览用。刻意做成接口而不是在 JS 里重写一遍 calc_price，
+   避免计价规则改动后两边不一致。 */
+EMSCRIPTEN_KEEPALIVE const char *api_price(int board, int alight, int firstclass) {
+    if (board < 0 || board >= STATION_COUNT || alight < 0 || alight >= STATION_COUNT) {
+        return resp_fail("invalid_trip", "车站编号越界");
+    }
+    json_reset();
+    json_puts("{\"ok\":true,\"code\":\"ok\",");
+    json_int_field("price", calc_price(board, alight, firstclass));
+    json_puts(",");
+    json_int_field("segments", board > alight ? board - alight : alight - board);
+    json_puts("}");
+    return json_finish();
+}
+
 EMSCRIPTEN_KEEPALIVE const char *api_seats_left(const char *train_no, const char *date,
                                                 int board, int alight, int firstclass) {
     if (train_no == NULL || date == NULL) {
@@ -436,8 +465,12 @@ EMSCRIPTEN_KEEPALIVE const char *api_load(const char *path) {
             json_puts("}");
             return json_finish();
         case LOAD_NO_FILE:
-            /* 首次运行，没有存档。这是唯一可以放心写入的状态之一。 */
-            return resp_ok("empty");
+            /* 首次运行，没有存档。这是唯一可以放心写入的状态之一。
+               result 字段是前端区分「没有存档」与「存档损坏」的依据，
+               损坏时走的是 code:"rejected" 分支。 */
+            json_reset();
+            json_puts("{\"ok\":true,\"code\":\"ok\",\"result\":\"empty\"}");
+            return json_finish();
         case LOAD_NO_MEMORY:
             return resp_fail("no_memory", "内存不足，无法读取存档");
         case LOAD_REJECTED:

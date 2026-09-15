@@ -14,22 +14,55 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$ROOT"
 
-# --- 找到 emcc -----------------------------------------------------------------
-if ! command -v emcc >/dev/null 2>&1; then
-  # 本地没把 emsdk 加进 PATH 时，尝试激活一份
-  for candidate in "${EMSDK_DIR:-}" "$ROOT/../emsdk" "D:/emsdk" "$HOME/emsdk"; do
-    [ -n "$candidate" ] || continue
-    if [ -f "$candidate/emsdk_env.sh" ]; then
-      # shellcheck disable=SC1090,SC1091
-      source "$candidate/emsdk_env.sh" >/dev/null 2>&1 || true
-      break
-    fi
+# --- 定位 emsdk 并准备环境 -------------------------------------------------------
+# 不直接 source emsdk_env.sh：那个脚本内部也会调用 `python`，
+# 在 Windows 上会命中应用商店的存根而失败。这里手动设置它本来要设的几个变量。
+EMSDK_DIR="${EMSDK_DIR:-}"
+if [ -z "$EMSDK_DIR" ]; then
+  for candidate in "D:/emsdk" "$ROOT/../emsdk" "$HOME/emsdk"; do
+    if [ -f "$candidate/emsdk.py" ]; then EMSDK_DIR="$candidate"; break; fi
   done
 fi
 
-if ! command -v emcc >/dev/null 2>&1; then
+if [ -n "$EMSDK_DIR" ] && [ -f "$EMSDK_DIR/.emscripten" ]; then
+  # .emscripten 里写着 emsdk_path = os.path.dirname(os.getenv('EM_CONFIG'))，
+  # 所以 EM_CONFIG 必须显式给出，否则解析不出各工具的路径
+  export EM_CONFIG="${EM_CONFIG:-$EMSDK_DIR/.emscripten}"
+
+  # PATH 必须用 POSIX 风格：Git Bash 只认 /d/... 不认 D:/...，
+  # 直接塞 D:/emsdk/... 进去的话 command -v 永远找不到，而且不报任何错。
+  EMSDK_POSIX="$EMSDK_DIR"
+  if command -v cygpath >/dev/null 2>&1; then
+    EMSDK_POSIX="$(cygpath -u "$EMSDK_DIR")"
+  fi
+  export PATH="$EMSDK_POSIX/upstream/emscripten:$PATH"
+
+  # emcc 是个 #!/usr/bin/env python 的脚本，需要一个能用的 python 才能启动。
+  # 用 emsdk 自带的那个，不依赖系统是否装了 Python。
+  if [ -z "${EMSDK_PYTHON:-}" ]; then
+    for py in "$EMSDK_DIR"/python/*/python.exe "$EMSDK_DIR"/python/*/bin/python3; do
+      if [ -x "$py" ]; then export EMSDK_PYTHON="$py"; break; fi
+    done
+  fi
+fi
+
+# --- 找到可用的 emcc -------------------------------------------------------------
+# 必须实际跑一次 --version 来判定，不能只看 command -v：
+# Windows 上 PATH 里的 `emcc`（无扩展名）是个 #!/usr/bin/env python 脚本，
+# 它能被 command -v 找到，但一执行就命中应用商店的 python 存根而失败，
+# 而且它不认 EMSDK_PYTHON（只有 .bat 版本认）。所以 .bat 优先。
+# 在 Linux/CI 上 emcc.bat 不存在，command -v 会失败，自然回落到 emcc。
+EMCC=""
+for candidate in emcc.bat emcc; do
+  if command -v "$candidate" >/dev/null 2>&1 && "$candidate" --version >/dev/null 2>&1; then
+    EMCC="$candidate"
+    break
+  fi
+done
+
+if [ -z "$EMCC" ]; then
   cat >&2 <<'EOF'
-找不到 emcc。
+找不到可用的 emcc。
 
 请先安装 Emscripten 工具链（约 1GB），或设置 EMSDK_DIR 指向已有安装：
 
@@ -38,13 +71,16 @@ if ! command -v emcc >/dev/null 2>&1; then
   "<真 Python 的绝对路径>" emsdk.py install 3.1.64
   "<真 Python 的绝对路径>" emsdk.py activate 3.1.64
 
-注意 Windows 上 `python` 是应用商店的存根，会失败，必须用真解释器路径。
+Windows 上的两个坑（详见 README）：
+  1. `python` 是应用商店的存根，必须给真解释器的绝对路径
+  2. emsdk 安装失败时退出码仍是 0，要用 emcc.bat 是否存在来判定成功
 EOF
   exit 1
 fi
 
-echo "emcc: $(command -v emcc)"
-emcc --version | head -1
+echo "emsdk: $EMSDK_DIR"
+echo "emcc:  $(command -v "$EMCC")"
+"$EMCC" --version | head -1
 
 # --- 静态文件先就位 -------------------------------------------------------------
 # 必须先拷贝：否则 dist/index.html 不存在，Pages 发布会「成功」但打开是 404
@@ -70,7 +106,7 @@ fi
 # 只导出 _malloc/_free：api_* 都用 EMSCRIPTEN_KEEPALIVE 标注，
 # KEEPALIVE 会自动追加到导出表，省得逐个维护函数名。
 # shellcheck disable=SC2086
-emcc web/src/web_api.c train_model.c -I. \
+"$EMCC" web/src/web_api.c train_model.c -I. \
      -std=c17 $OPT_FLAGS ${EMCC_EXTRA_FLAGS:-} \
      -o web/dist/train_web.js \
      --no-entry \

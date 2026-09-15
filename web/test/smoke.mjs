@@ -92,6 +92,7 @@ async function freshModule() {
     carriages: cw('api_carriages', 'string', ['string', 'string', 'number']),
     segments:  cw('api_segments', 'string', ['string', 'string']),
     seatsLeft: cw('api_seats_left', 'string', ['string', 'string', 'number', 'number', 'number']),
+    price:     cw('api_price', 'string', ['number', 'number', 'number']),
     load:      cw('api_load', 'string', ['string']),
     save:      cw('api_save', 'string', ['string']),
     expire:    cw('api_expire', 'string', ['string']),
@@ -115,6 +116,18 @@ async function main() {
   check(opts.stations.length === 6, '应有 6 个车站');
   check(opts.trains.length === 10, '应有 10 个车次');
   check(opts.stations[0] === '上海', '首个车站应为上海（UTF-8 未被破坏）');
+  check(opts.trains[0].code === 'G1' && opts.trains[0].northbound === 1,
+        'G1 应为北京→上海方向（奇数车次）');
+  check(opts.trains[1].code === 'G2' && opts.trains[1].northbound === 0,
+        'G2 应为上海→北京方向（偶数车次）');
+  check(opts.trains[0].depart === '06:00' && opts.trains[1].depart === '06:30',
+        '发车时间应为 G1=06:00、G2=06:30');
+
+  // 票价由 C 计算，前端不应在 JS 里重写规则
+  check(j(api.price(0, 2, 0)).price === 300, '上海→南京 二等座 应为 300 元');
+  check(j(api.price(0, 2, 1)).price === 400, '上海→南京 一等座 应为 400 元');
+  check(j(api.price(5, 0, 0)).price === 750, '北京→上海 二等座 应为 750 元（反向应取绝对值）');
+  check(!j(api.price(-1, 2, 0)).ok, '车站越界时 api_price 应失败');
 
   check(j(api.load(ARCHIVE)).result === 'empty', '无存档时 api_load 应报 empty');
 
@@ -146,29 +159,47 @@ async function main() {
     check(found && found.name === 'a"b\\c', '姓名中的引号与反斜杠应原样往返');
   }
 
-  r = j(api.sell('1004', '六个汉字刚刚好', tomorrow, 'G2', 3, 5, 0));
+  // 先自校验测试数据本身，避免像最初那样把 7 个汉字误当成 6 个
+  const sixChars = '六个汉字刚好';
+  const sevenChars = '七个汉字就超了';
+  check(Buffer.byteLength(sixChars, 'utf8') === 18, '测试用的 6 汉字串应为 18 字节');
+  check(Buffer.byteLength(sevenChars, 'utf8') === 21, '测试用的 7 汉字串应为 21 字节');
+
+  r = j(api.sell('1004', sixChars, tomorrow, 'G2', 3, 5, 0));
   check(r.ok, '18 字节（6 个汉字）的姓名应能售出');
 
-  r = j(api.sell('1005', '七个汉字就超了呀', tomorrow, 'G2', 3, 5, 0));
-  check(!r.ok && r.code === 'invalid_name', '21 字节的姓名应被拒（name[20] 装不下）');
+  r = j(api.sell('1005', sevenChars, tomorrow, 'G2', 3, 5, 0));
+  check(!r.ok && r.code === 'invalid_name', '21 字节（7 个汉字）应被拒，name[20] 只有 19 字节可用');
 
   r = j(api.sell('1006', '', tomorrow, 'G2', 3, 5, 0));
   check(!r.ok && r.code === 'invalid_name', '空姓名应被拒');
 
   // ---- 4. 区段复用 ----
+  /* 注意：选厢策略是「人数最少的车厢」，所以两个区段不相交的旅客会先被分散到
+     不同车厢，而不是立刻复用座位。要观察复用，需先把各车厢人数撑平。 */
   console.log('区段复用');
   const seg = await freshModule();
   const a = j(seg.api.sell('2000', 'A', tomorrow, 'G2', 0, 2, 0));
-  const b = j(seg.api.sell('2001', 'B', tomorrow, 'G2', 3, 5, 0));
-  check(a.ok && b.ok, '两张不相交区段的票都应售出');
-  check(a.carriage === b.carriage && a.seat === b.seat,
-        '区段不相交应复用同一座位（' + a.carriage + '/' + a.seat + ' vs ' + b.carriage + '/' + b.seat + '）');
+  check(a.ok && a.carriage === 3 && a.seat === 1, '首张应落在 车厢3 1号座');
 
-  const c = j(seg.api.sell('2002', 'C', tomorrow, 'G2', 1, 4, 0));
-  check(c.ok, '相交区段的票应售出');
-  check(!(c.carriage === a.carriage && c.seat === a.seat), '区段相交不能复用同一座位');
+  const b = j(seg.api.sell('2001', 'B', tomorrow, 'G2', 0, 2, 0));
+  check(b.ok && b.carriage === 4, '第二张应落到人数更少的车厢4（平均分配）');
 
-  // 奇数车次的反向区间（朴素重叠公式在这里会失效）
+  const c = j(seg.api.sell('2002', 'C', tomorrow, 'G2', 0, 2, 0));
+  check(c.ok && c.carriage === 5, '第三张应落到车厢5，三节铺平');
+
+  // 此刻 3/4/5 各 1 人，人数持平，再卖一张不相交区段的票会回到车厢3 的 1 号座
+  const d = j(seg.api.sell('2003', 'D', tomorrow, 'G2', 3, 5, 0));
+  check(d.ok, '人数持平时第四张应能售出');
+  check(d.carriage === 3 && d.seat === 1,
+        '各厢人数持平时，区段不相交应复用 车厢3 1号座（实际 ' + d.carriage + '/' + d.seat + '）');
+
+  // 区段相交则绝不能复用
+  const e = j(seg.api.sell('2004', 'E', tomorrow, 'G2', 1, 4, 0));
+  check(e.ok, '区段相交的票应售出');
+  check(!(e.carriage === 3 && e.seat === 1), '区段相交不能分到已被占用的座位');
+
+  // 奇数车次的反向区间（朴素重叠公式 b1<a2 && a1>b2 在这里会误判为不重叠）
   const odd = await freshModule();
   const oa = j(odd.api.sell('3000', 'A', tomorrow, 'G1', 5, 0, 0));   // 北京→上海 全程
   const ob = j(odd.api.sell('3001', 'B', tomorrow, 'G1', 3, 0, 0));   // 济南→上海，与之重叠
@@ -196,7 +227,9 @@ async function main() {
   console.log('存档往返');
   const before = j(dist.api.state());
   check(j(dist.api.save(ARCHIVE)).ok, 'api_save 应成功');
-  const bytes = Module.FS.readFile(ARCHIVE);
+  // 必须用 dist.Module：每个 wasm 实例有各自独立的线性内存与 MEMFS，
+  // 读顶层 Module 的文件系统会 ENOENT（存档是写到 dist 那个实例里的）
+  const bytes = dist.Module.FS.readFile(ARCHIVE);
   check(bytes.length === 16 + before.count * RECORD_SIZE,
         '文件长度应为 16 + n×70（实际 ' + bytes.length + '，n=' + before.count + '）');
   check(MAGIC.every((m, i) => bytes[i] === m), '存档魔数应为 TRNP');

@@ -20,8 +20,8 @@ cd /d/emsdk
 "<Python 可执行文件的绝对路径>" emsdk.py activate 3.1.64
 ```
 
-> **Windows 上最大的坑**：`python` 这个命令是「应用商店」的存根，直接跑 `emsdk.bat` 会失败，
-> 而报错信息具有误导性。必须用真解释器的绝对路径，例如：
+> **坑 1 —— `python` 是应用商店的存根。**
+> 直接跑 `emsdk.bat` 会失败，而报错信息具有误导性。必须用真解释器的绝对路径：
 >
 > ```
 > "C:\Users\<你>\AppData\Local\Programs\Python\Python314\python.exe" emsdk.py install 3.1.64
@@ -29,6 +29,41 @@ cd /d/emsdk
 >
 > 用 `py -0p` 可以列出机器上所有已安装的 Python 及其路径。
 > 顺带一提，emsdk 会自己下载一份便携 Python 和 Node，所以系统没装 Node 也不影响构建。
+>
+> **坑 2 —— 安装失败时 `emsdk.py` 仍以退出码 0 结束。**
+> 脚本里会打印 `error: installation failed!`，但退出码依然是 0，
+> 所以 CI 或 `&&` 串联的脚本会误以为成功。工具链包（`wasm-binaries.zip`，约 516MB）
+> 一旦下载被网络中断截断，解压时报 `File is not a zip file!` 然后把它删掉，
+> 你的 emsdk 目录看起来「装完了」其实什么都没有。
+>
+> **务必用文件是否存在来判定成功，而不是退出码：**
+>
+> ```bash
+> ls D:/emsdk/upstream/emscripten/emcc.bat   # 存在才算装好
+> ```
+>
+> **坑 3 —— emsdk 默认从不复用已下载的包。**
+> `emsdk.py` 第 708 行是 `if KEEP_DOWNLOADS and os.path.exists(file_name)`，
+> 而 `KEEP_DOWNLOADS` 来自环境变量 `EMSDK_KEEP_DOWNLOADS`，**默认为假**。
+> 也就是说每次重跑 `install` 都会用 `open(file_name, 'wb')`（第 676 行）
+> **截断并从头重下**那 516MB，哪怕本地已经有一份完好且校验过的。
+> 网络不稳时这会变成「永远下不完」。
+>
+> 可靠的绕法：先用支持断点续传的 curl 把包下到 `D:/emsdk/downloads/`
+> （文件名就是 emsdk 打印出来的那个），再让 emsdk 复用它：
+>
+> ```bash
+> URL="https://storage.googleapis.com/webassembly/emscripten-releases-builds/win/<hash>-wasm-binaries.zip"
+> OUT="D:/emsdk/downloads/<hash>-wasm-binaries.zip"
+> curl -C - -o "$OUT" --retry 3 "$URL"          # 断了就重跑，会从断点接上
+> EMSDK_KEEP_DOWNLOADS=1 python emsdk.py install 3.1.64
+> ```
+>
+> 另外 emsdk 还认 `EMSDK_USE_CURL=1`（改用 curl 下载，可配合 `HTTPS_PROXY` 环境变量走代理），
+> 以及 `EMSDK_NOTTY=1`。完整开关列表见 `emsdk.py --help`。
+>
+> 国内直连 `storage.googleapis.com` 常年在 60 KB/s 上下（约 2 小时），
+> 走代理通常能到 1 MB/s 以上（约 7 分钟）。
 
 ### 构建网页版
 
@@ -59,12 +94,23 @@ cd web/dist && py -m http.server 8000
 
 ## 测试
 
+两层，都不需要浏览器：
+
 ```bash
-node web/test/smoke.mjs
+node web/test/smoke.mjs      # wasm 侧业务逻辑（67 项）
+node web/test/dom-smoke.mjs  # 界面层接线（23 项，需 jsdom）
 ```
 
-在 Node 里无头跑同一份 wasm，覆盖 JSON 转义、姓名字节边界、区段复用、车厢人数平均、
-存档往返、以及**损坏存档拒收**——最后这条是开发期用干净小数据完全测不出来的路径。
+`smoke.mjs` 在 Node 里无头跑同一份 wasm，覆盖 JSON 转义、姓名字节边界、区段复用、
+车厢人数平均、存档往返、以及**损坏存档拒收**——最后这条是开发期用干净小数据
+完全测不出来的路径。
+
+`dom-smoke.mjs` 用 jsdom 加载真实页面，验证元素 id 对得上、售票/退票流程、
+标签页切换、语言切换、i18n 渲染。jsdom 是可选依赖，未安装时会自动跳过：
+
+```bash
+npm install jsdom
+```
 
 ## 部署到 GitHub Pages
 

@@ -47,6 +47,12 @@ jobs:
       - name: 冒烟测试（Node 无头运行同一份 wasm）
         run: node web/test/smoke.mjs
 
+      # 界面层接线测试。jsdom 是可选依赖，没装时该脚本会自行跳过。
+      - name: 界面层测试（jsdom）
+        run: |
+          npm install --no-save --no-audit --no-fund jsdom
+          node web/test/dom-smoke.mjs
+
       - uses: actions/configure-pages@v5
 
       # dist/ 被 gitignore 不影响发布：这个动作从工作区磁盘打包，不读 git
