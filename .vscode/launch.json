@@ -1,0 +1,73 @@
+{
+    // 按 F5 启动（会先自动构建）。三个配置分别对应 GUI 版、控制台版、单元测试。
+    // 调试器路径用 ${env:LOCALAPPDATA} 推导，避免写死用户名；
+    // 若 MinGW 包升级导致目录名变化，把 miDebuggerPath 改成 `gdb` 或你自己的 gdb.exe 路径即可。
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "运行 GUI 版",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-gui/train_gui.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${env:LOCALAPPDATA}/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "构建：全部（GUI + 控制台 + 测试）"
+        },
+        {
+            "name": "调试控制台版",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-gui/train_console.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            // 控制台版需要键盘输入，必须用独立窗口，集成终端里无法交互
+            "externalConsole": true,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${env:LOCALAPPDATA}/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "构建：全部（GUI + 控制台 + 测试）"
+        },
+        {
+            "name": "调试单元测试",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build-gui/model_tests.exe",
+            "args": [],
+            "stopAtEntry": false,
+            // 测试会在当前目录写临时存档，跑在 build-gui 下避免污染源码目录
+            "cwd": "${workspaceFolder}/build-gui",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "miDebuggerPath": "${env:LOCALAPPDATA}/Microsoft/WinGet/Packages/BrechtSanders.WinLibs.POSIX.UCRT_Microsoft.Winget.Source_8wekyb3d8bbwe/mingw64/bin/gdb.exe",
+            "setupCommands": [
+                {
+                    "description": "为 gdb 启用整齐打印",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "构建：全部（GUI + 控制台 + 测试）"
+        }
+    ]
+}

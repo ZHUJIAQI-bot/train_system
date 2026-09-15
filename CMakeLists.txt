@@ -2,6 +2,13 @@ cmake_minimum_required(VERSION 3.20)
 
 project(train_system C)
 
+# 未显式指定构建类型时默认 Debug：带 -g 调试信息，IDE 里才能打断点。
+# 原来 CMAKE_BUILD_TYPE 为空，编译时既无优化也无调试信息。
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS Debug Release RelWithDebInfo MinSizeRel)
+endif()
+
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
