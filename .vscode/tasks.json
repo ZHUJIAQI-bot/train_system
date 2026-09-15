@@ -2,11 +2,11 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "CMake: Build train_gui",
+            "label": "构建：全部（GUI + 控制台 + 测试）",
             "type": "shell",
-            "command": "cmake --build D:/train_system/build-gui",
+            "command": "cmake -S . -B build-gui && cmake --build build-gui",
             "options": {
-                "cwd": "D:/train_system"
+                "cwd": "${workspaceFolder}"
             },
             "group": {
                 "kind": "build",
@@ -15,13 +15,42 @@
             "problemMatcher": "$gcc"
         },
         {
-            "label": "CMake: Run train_gui",
+            "label": "构建：仅控制台与测试（不拉 raylib，可完全离线）",
             "type": "shell",
-            "command": "D:/train_system/build-gui/train_gui.exe",
+            "command": "cmake -S . -B build-console -G Ninja -DBUILD_GUI=OFF -DBUILD_TESTS=ON && cmake --build build-console",
             "options": {
-                "cwd": "D:/train_system"
+                "cwd": "${workspaceFolder}"
             },
-            "dependsOn": "CMake: Build train_gui",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "运行：GUI 版",
+            "type": "shell",
+            "command": "${workspaceFolder}/build-gui/train_gui.exe",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": "构建：全部（GUI + 控制台 + 测试）",
+            "problemMatcher": []
+        },
+        {
+            "label": "运行：控制台版",
+            "type": "shell",
+            "command": "${workspaceFolder}/build-gui/train_console.exe",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": "构建：全部（GUI + 控制台 + 测试）",
+            "problemMatcher": []
+        },
+        {
+            "label": "运行：单元测试",
+            "type": "shell",
+            "command": "${workspaceFolder}/build-gui/model_tests.exe",
+            "options": {
+                "cwd": "${workspaceFolder}/build-gui"
+            },
+            "dependsOn": "构建：全部（GUI + 控制台 + 测试）",
             "problemMatcher": []
         }
     ]
