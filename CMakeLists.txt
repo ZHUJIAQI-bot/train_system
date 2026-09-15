@@ -12,7 +12,7 @@ option(BUILD_GUI "Build the raylib GUI front-end" ON)
 option(BUILD_TESTS "Build the model unit tests" ON)
 
 # ---- 控制台版：零外部依赖 ----
-add_executable(train_console train_list.c)
+add_executable(train_console train_list.c train_model.c)
 
 if(BUILD_GUI)
     include(FetchContent)
@@ -25,7 +25,7 @@ if(BUILD_GUI)
     )
     FetchContent_MakeAvailable(raylib)
 
-    add_executable(train_gui train_gui.c)
+    add_executable(train_gui train_gui.c train_model.c)
     target_link_libraries(train_gui PRIVATE raylib)
 
     if(WIN32)

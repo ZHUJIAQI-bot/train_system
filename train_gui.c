@@ -1,11 +1,8 @@
 #include "raylib.h"
 #include <time.h>
 
-/* Reuse the existing data model and linked-list operations while the UI is
-   being separated from the original console entry point. */
-#define main train_console_main
-#include "train_list.c"
-#undef main
+/* 数据模型与链表操作已拆到独立模块，GUI 只包含头文件。 */
+#include "train_model.h"
 
 #define WINDOW_WIDTH 1180
 #define WINDOW_HEIGHT 720
