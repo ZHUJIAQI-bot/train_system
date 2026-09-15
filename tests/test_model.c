@@ -100,41 +100,112 @@ static void test_trip(void) {
     check(!validate_trip("G2", "2023-02-29", 0, 2, 0, err, sizeof(err)), "平年2月29 非法");
 }
 
-/* ---------------- 座位区段复用 ---------------- */
+/* ---------------- 座位区段复用 ----------------
+   复用语义直接测 seat_available，避免被「平均分配」的选厢策略干扰。 */
 static void test_seat_reuse(void) {
     printf("座位区段复用\n");
     int c, s;
 
     reset();
     insert_passenger(make("1111", "2026-09-16", "G2", 0, 2, 0, 3, 1));
-    check(assign_seat("G2", "2026-09-16", 0, 3, 5, &c, &s), "区段不相交的第二位旅客应能买到座");
-    check(c == 3 && s == 1, "区段不相交 → 应复用 车厢3 1号座");
+    check(seat_available("G2", "2026-09-16", 3, 1, 3, 5), "区段不相交 → 同一座位仍可售");
+    check(!seat_available("G2", "2026-09-16", 3, 1, 1, 4), "区段相交 → 同一座位不可售");
+    check(seat_available("G2", "2026-09-16", 3, 1, 2, 5), "同站衔接（南京下车/南京上车）不重叠");
+    check(seat_available("G2", "2026-09-17", 3, 1, 0, 5), "换日期 → 同一座位可售");
+    check(seat_available("G4", "2026-09-16", 3, 1, 0, 5), "换车次 → 同一座位可售");
+    check(seat_available("G2", "2026-09-16", 4, 1, 0, 5), "别的车厢不受影响");
 
-    reset();
-    insert_passenger(make("1111", "2026-09-16", "G2", 0, 2, 0, 3, 1));
-    check(assign_seat("G2", "2026-09-16", 0, 1, 4, &c, &s), "区段相交的旅客应能买到座");
-    check(!(c == 3 && s == 1), "区段相交 → 不能复用同一座位");
-
-    reset();
-    insert_passenger(make("1111", "2026-09-16", "G2", 0, 5, 0, 3, 1));
-    check(assign_seat("G2", "2026-09-17", 0, 0, 5, &c, &s), "次日同一行程应能买到座");
-    check(c == 3 && s == 1, "换日期 → 同一座位可再售");
-
-    reset();
-    insert_passenger(make("1111", "2026-09-16", "G2", 0, 5, 0, 3, 1));
-    check(assign_seat("G4", "2026-09-16", 0, 0, 5, &c, &s), "其他车次同一行程应能买到座");
-    check(c == 3 && s == 1, "换车次 → 同一座位可再售");
-
-    // 奇数车次的两个方向都要覆盖：只用偶数车次测不出反向区间的 bug
+    // 奇数车次的反向区间：朴素写法 b1<a2 && a1>b2 在这里会误判为「不重叠」
     reset();
     insert_passenger(make("1111", "2026-09-16", "G1", 5, 2, 0, 3, 1));  // 北京→南京 [2,5)
-    check(assign_seat("G1", "2026-09-16", 0, 2, 0, &c, &s), "G1 南京→上海 应能买到座");
-    check(c == 3 && s == 1, "G1 区段不相交 → 应复用同一座位");
+    check(seat_available("G1", "2026-09-16", 3, 1, 2, 0), "G1 区段不相交 → 同一座位可售");
 
     reset();
     insert_passenger(make("1111", "2026-09-16", "G1", 5, 0, 0, 3, 1));  // 北京→上海 [0,5)
-    check(assign_seat("G1", "2026-09-16", 0, 3, 0, &c, &s), "G1 济南→上海 应能买到座");
-    check(!(c == 3 && s == 1), "G1 区段重叠 → 不能复用（奇数车次回归）");
+    check(!seat_available("G1", "2026-09-16", 3, 1, 3, 0),
+          "G1 区段重叠 → 同一座位不可售（奇数车次回归）");
+
+    // assign_seat 层：区段相交时绝不能分到已被占用的那个座位
+    reset();
+    insert_passenger(make("1111", "2026-09-16", "G2", 0, 2, 0, 3, 1));
+    check(assign_seat("G2", "2026-09-16", 0, 1, 4, &c, &s), "区段相交的旅客应能买到座");
+    check(!(c == 3 && s == 1), "区段相交 → 不能分到已被占用的座位");
+
+    // 各车厢人数持平时，区段不相交确实会复用同一座位
+    reset();
+    insert_passenger(make("1111", "2026-09-16", "G2", 0, 2, 0, 3, 1));
+    insert_passenger(make("2222", "2026-09-16", "G2", 0, 2, 0, 4, 1));
+    insert_passenger(make("3333", "2026-09-16", "G2", 0, 2, 0, 5, 1));
+    check(assign_seat("G2", "2026-09-16", 0, 3, 5, &c, &s), "人数持平时应能买到座");
+    check(c == 3 && s == 1, "人数持平时，区段不相交应复用 车厢3 1号座");
+}
+
+/* ---------------- 等级内车厢人数平均分配 ----------------
+   判据必须是「人数」而不是「余票数」：区段复用下某车厢可能坐很多人却只占少数座位，
+   按余票选会一直挑中余票多的那节，人数就偏了。 */
+static void test_even_distribution(void) {
+    printf("等级内车厢人数平均分配\n");
+    char id[5];
+    int c, s;
+
+    // 二等座 36 张（车厢 3/4/5 各 12 座）→ 每节应正好 12 人
+    reset();
+    for (int i = 0; i < 36; i++) {
+        snprintf(id, sizeof(id), "%04d", i);
+        if (!assign_seat("G2", "2026-09-16", 0, 0, 5, &c, &s)) break;
+        insert_passenger(make(id, "2026-09-16", "G2", 0, 5, 0, c, s));
+    }
+    check(carriage_headcount("G2", "2026-09-16", 3) == 12, "二等座车厢3 应 12 人");
+    check(carriage_headcount("G2", "2026-09-16", 4) == 12, "二等座车厢4 应 12 人");
+    check(carriage_headcount("G2", "2026-09-16", 5) == 12, "二等座车厢5 应 12 人");
+
+    // 一等座 16 张（车厢 1/2 各 8 座）→ 每节应正好 8 人
+    reset();
+    for (int i = 0; i < 16; i++) {
+        snprintf(id, sizeof(id), "%04d", i);
+        if (!assign_seat("G2", "2026-09-16", 1, 0, 5, &c, &s)) break;
+        insert_passenger(make(id, "2026-09-16", "G2", 0, 5, 1, c, s));
+    }
+    check(carriage_headcount("G2", "2026-09-16", 1) == 8, "一等座车厢1 应 8 人");
+    check(carriage_headcount("G2", "2026-09-16", 2) == 8, "一等座车厢2 应 8 人");
+
+    // 售票全过程中，同等级各车厢人数差始终不超过 1
+    reset();
+    int balanced = 1;
+    for (int i = 0; i < 30; i++) {
+        snprintf(id, sizeof(id), "%04d", i);
+        if (!assign_seat("G2", "2026-09-16", 0, 0, 5, &c, &s)) break;
+        insert_passenger(make(id, "2026-09-16", "G2", 0, 5, 0, c, s));
+        int h3 = carriage_headcount("G2", "2026-09-16", 3);
+        int h4 = carriage_headcount("G2", "2026-09-16", 4);
+        int h5 = carriage_headcount("G2", "2026-09-16", 5);
+        int hi = h3 > h4 ? h3 : h4; if (h5 > hi) hi = h5;
+        int lo = h3 < h4 ? h3 : h4; if (h5 < lo) lo = h5;
+        if (hi - lo > 1) balanced = 0;
+    }
+    check(balanced, "售票全过程中二等座各车厢人数差应始终不超过 1");
+
+    // 关键用例：旅客区段互不重叠（座位可复用）时，人数仍须平均。
+    // 按「余票最多」选厢会一直偏向被复用的那节车厢，人数差会超过 1。
+    reset();
+    balanced = 1;
+    for (int i = 0; i < 12; i++) {
+        snprintf(id, sizeof(id), "%04d", i);
+        int board = (i % 2) ? 3 : 0;
+        int alight = (i % 2) ? 5 : 2;
+        if (!assign_seat("G2", "2026-09-16", 0, board, alight, &c, &s)) break;
+        insert_passenger(make(id, "2026-09-16", "G2", board, alight, 0, c, s));
+        int h3 = carriage_headcount("G2", "2026-09-16", 3);
+        int h4 = carriage_headcount("G2", "2026-09-16", 4);
+        int h5 = carriage_headcount("G2", "2026-09-16", 5);
+        int hi = h3 > h4 ? h3 : h4; if (h5 > hi) hi = h5;
+        int lo = h3 < h4 ? h3 : h4; if (h5 < lo) lo = h5;
+        if (hi - lo > 1) balanced = 0;
+    }
+    check(balanced, "区段不重叠时各车厢人数差仍应不超过 1");
+
+    // 等级之间互不干扰：二等座的分配不应把人算进一等座车厢
+    check(carriage_headcount("G2", "2026-09-16", 1) == 0, "二等座旅客不应进入一等座车厢");
 }
 
 /* ---------------- 等级约束与容量边界 ---------------- */
@@ -451,6 +522,7 @@ int main(void) {
     test_train();
     test_trip();
     test_seat_reuse();
+    test_even_distribution();
     test_class_and_capacity();
     test_indexes();
     test_stats();

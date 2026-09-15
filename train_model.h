@@ -122,6 +122,7 @@ int assign_seat(const char *train_no, const char *date, int firstclass,
 int passenger_count(void);
 int total_fare(void);                                            // 当前在车旅客票款合计
 int segment_load(const char *train_no, const char *date, int segment); // 覆盖该区段的人数
+int carriage_headcount(const char *train_no, const char *date, int carriage);
 int carriage_fully_free_seats(const char *train_no, const char *date, int carriage);
 int carriage_occupied_seats(const char *train_no, const char *date, int carriage);
 int occupied_seat_total(const char *date);                       // 去重 车次×车厢×座位

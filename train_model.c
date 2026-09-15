@@ -283,31 +283,41 @@ int seats_available(const char *train_no, const char *date, int firstclass,
     return total;
 }
 
-// 分配座位：在符合等级的车厢里选余票最多的那节，再取该车厢最小可用座位号。
-// 注意 best_count 必须初值小于任何合法值并显式判 0，否则第一节车厢会以 0 票被选中，
-// best_seat 保持 -1 被当成座位号写入。
+// 分配座位：在同一等级的车厢里选「当前旅客人数最少」的那节，再取该车厢最小可用座位号，
+// 从而保证每个等级内部各车厢人数平均分配。平局取车厢号小的。
+//
+// 判据必须用「人数」而不是「余票数」：区段复用下两者会背离 ——
+// 某车厢可能坐了 5 个人却只占 5 个座位（余票多），另一车厢坐 3 人占 3 个座位（余票少），
+// 按余票选会挑中人数更多的那节，人数就不平均了。
+//
+// 注意 best_seat 必须保持「该车厢内最小可用座位号」，不能是 -1：
+// 车厢若对本区间无可用座位则直接跳过（first_seat < 0），不参与比较。
 int assign_seat(const char *train_no, const char *date, int firstclass,
                 int board, int alight, int *out_carriage, int *out_seat) {
     int best_carriage = -1;
-    int best_count = -1;
+    int best_people = 0;
     int best_seat = -1;
 
     for (int c = 1; c <= CARRIAGE_COUNT; c++) {
         if (car_type[c] != (firstclass ? 1 : 2)) continue;   // 等级硬约束
-        int count = 0, first_seat = -1;
+
+        int first_seat = -1;
         for (int s = 1; s <= car_seats[c]; s++) {            // 上界用本车厢实际座位数
             if (seat_available(train_no, date, c, s, board, alight)) {
-                count++;
-                if (first_seat < 0) first_seat = s;
+                first_seat = s;
+                break;
             }
         }
-        if (count > best_count) {                            // 严格 >，平局取小车厢号
-            best_count = count;
+        if (first_seat < 0) continue;                        // 本车厢对该区间已无可用座位
+
+        int people = carriage_headcount(train_no, date, c);
+        if (best_carriage < 0 || people < best_people) {      // 严格 <，平局取小车厢号
             best_carriage = c;
+            best_people = people;
             best_seat = first_seat;
         }
     }
-    if (best_carriage < 0 || best_count == 0) return 0;      // 该区间该等级已售罄
+    if (best_carriage < 0) return 0;                         // 该区间该等级已售罄
     *out_carriage = best_carriage;
     *out_seat = best_seat;
     return 1;
@@ -353,6 +363,18 @@ static int seat_has_any_use(const char *train_no, const char *date,
         return 1;
     }
     return 0;
+}
+
+// 某车厢在某车次某日期下的实际旅客人数（选厢平均分配的依据）
+int carriage_headcount(const char *train_no, const char *date, int carriage) {
+    int n = 0;
+    for (Node *t = head; t != NULL; t = t->next) {
+        if (t->data.carriage != carriage) continue;
+        if (strcmp(t->data.train_no, train_no) != 0) continue;
+        if (strcmp(t->data.travel_date, date) != 0) continue;
+        n++;
+    }
+    return n;
 }
 
 int carriage_occupied_seats(const char *train_no, const char *date, int carriage) {
