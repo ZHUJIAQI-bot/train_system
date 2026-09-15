@@ -30,13 +30,13 @@ void print_all() {
         printf("当前车上没有旅客。\n");
         return;
     }
-    printf("%-6s %-10s %-5s %-5s %-5s %-4s %-4s %-4s\n",
-           "身份证", "姓名", "上站", "下站", "票价", "车厢", "座位", "等级");
+    printf("%-6s %-10s %-12s %-4s %-5s %-5s %-5s %-4s %-4s %-4s\n",
+           "身份证", "姓名", "日期", "车次", "上站", "下站", "票价", "车厢", "座位", "等级");
     Node *t = head;
     while (t != NULL) {
         Passenger *p = &t->data;
-        printf("%-6s %-10s %-5s %-5s %-5d %-4d %-4d %-4s\n",
-               p->id, p->name,
+        printf("%-6s %-10s %-12s %-4s %-5s %-5s %-5d %-4d %-4d %-4s\n",
+               p->id, p->name, p->travel_date, p->train_no,
                stations[p->board], stations[p->alight],
                p->price, p->carriage, p->seat,
                p->firstclass ? "一等" : "二等");
@@ -44,74 +44,66 @@ void print_all() {
     }
 }
 
-// 按车厢统计：总座位 / 已售 / 余票
+// 按车厢统计（需指定车次+日期）：区段复用下「已售 N/12」没有意义，
+// 因此统计「全程空座」与「有被占用过的座位」两类，二者之和恒等于总座位数。
 void stat_by_carriage() {
-    printf("%-4s %-6s %-6s %-6s %-4s\n", "车厢", "类型", "总座位", "已售", "余票");
+    char train_no[8], date[20];
+    printf("车次(G1-G10)：");          scanf("%3s", train_no);
+    printf("出行日期(YYYY-MM-DD)：");   scanf("%10s", date);
+    if (!valid_train_no(train_no) || !valid_date(date)) {
+        printf("车次或日期不合法。\n");
+        return;
+    }
+    printf("%-4s %-6s %-6s %-8s %-8s\n", "车厢", "类型", "总座位", "全程空座", "已占用");
     for (int c = 1; c <= CARRIAGE_COUNT; c++) {
-        int taken = 0;
-        for (int s = 1; s <= car_seats[c]; s++)
-            if (seat_taken[c][s]) taken++;
-        printf("%-4d %-6s %-6d %-6d %-4d\n",
+        printf("%-4d %-6s %-6d %-8d %-8d\n",
                c, car_type[c] == 1 ? "一等座" : "二等座",
-               car_seats[c], taken, car_seats[c] - taken);
+               car_seats[c],
+               carriage_fully_free_seats(train_no, date, c),
+               carriage_occupied_seats(train_no, date, c));
     }
 }
 
-// 售票：分配一个空座位 + 添加旅客
+// 售票：按车次+日期+区段分配座位，并把旅客加入链表
 void sell_ticket() {
-    char id[20], name[20];
+    char id[20], name[20], train_no[8], date[20];
     int board, alight, firstclass;
+    char err[160];
 
     printf("身份证后4位：");   scanf("%19s", id);
     if (!valid_id(id)) {
         printf("身份证后4位不合法：应为4位数字，或3位数字+末尾x/X。\n");
         return;
     }
-
     if (search_passenger(id) != NULL) {
         printf("该旅客已经购票，不能重复购票。\n");
         return;
     }
-    printf("姓名：");           scanf("%19s", name);  // 限宽，避免超过 name[20] 越界
+    printf("姓名：");                    scanf("%19s", name);   // 限宽，避免超过 name[20] 越界
+    printf("出行日期(YYYY-MM-DD)：");    scanf("%10s", date);
+    printf("车次(G1-G10)：");            scanf("%3s", train_no);
     if (!read_int("上车站(0上海 1苏州 2南京 3济南 4天津 5北京)：", &board)) return;
     if (!read_int("下车站(0上海 1苏州 2南京 3济南 4天津 5北京)：", &alight)) return;
     if (!read_int("等级(0二等座 1一等座)：", &firstclass)) return;
 
-    int input_valid = 1;
-    if (board < 0 || board > 5 || alight < 0 || alight > 5) {
-        printf("车站编号不合法（应在 0~5 之间）。\n");
-        input_valid = 0;
-    } else if (alight == board) {
-        printf("车站不合法：上下车站不能相同。\n");
-        input_valid = 0;
-    }
-    if (firstclass != 0 && firstclass != 1) {
-        printf("等级不合法：只能输入 0（二等座）或 1（一等座）。\n");
-        input_valid = 0;
-    }
-    if (!input_valid) {
+    // 车次/日期/车站/方向/等级 全部交给模型层统一校验
+    if (!validate_trip(train_no, date, board, alight, firstclass, err, sizeof(err))) {
+        printf("%s\n", err);
         return;
     }
 
-    // 平均分配：在符合等级的车厢里，选当前余票最多的那节，再找它的第一个空座
-    int c = -1, s = -1, best_left = -1;
-    for (int i = 1; i <= CARRIAGE_COUNT; i++) {
-        if (car_type[i] != (firstclass ? 1 : 2)) continue; // 等级不符，跳过
-        int left = 0;
-        for (int j = 1; j <= car_seats[i]; j++)
-            if (seat_taken[i][j] == 0) left++;
-        if (left > best_left) { best_left = left; c = i; }
-    }
-    if (c == -1 || best_left == 0) {
-        printf("该等级座位已售罄，建议改乘其他车次。\n");
+    int c = -1, s = -1;
+    if (!assign_seat(train_no, date, firstclass, board, alight, &c, &s)) {
+        printf("该区间该等级座位已售罄，建议改乘其他车次。\n");
         return;
     }
-    for (int j = 1; j <= car_seats[c]; j++)
-        if (seat_taken[c][j] == 0) { s = j; break; }
 
-    Passenger p;
-    strcpy(p.id, id);
-    strcpy(p.name, name);
+    Passenger p = {0};             // 先全零，保证没有未初始化的字段
+    strncpy(p.id, id, sizeof(p.id) - 1);
+    strncpy(p.name, name, sizeof(p.name) - 1);
+    strncpy(p.travel_date, date, sizeof(p.travel_date) - 1);
+    strncpy(p.train_no, train_no, sizeof(p.train_no) - 1);
+    train_depart_time(train_number_of(train_no), p.depart_time);
     p.board      = board;
     p.alight     = alight;
     p.firstclass = firstclass;
@@ -123,10 +115,9 @@ void sell_ticket() {
         printf("购票失败，无法保存旅客信息。\n");
         return;
     }
-    seat_taken[c][s] = 1;      // 标记座位已售
 
-    printf("购票成功！%s %s 车厢%d %d号座位，票价%d元。\n",
-           p.name, stations[p.board], c, s, p.price);
+    printf("购票成功！%s %s %s %s发车 车厢%d %d号座位，票价%d元。\n",
+           p.name, p.travel_date, p.train_no, p.depart_time, c, s, p.price);
 }
 
 // 旅客下车
@@ -157,21 +148,37 @@ void query_by_id() {
            p->firstclass ? "一等座" : "二等座");
 }
 
-// 分类统计：各站上下车人数 + 总票款
+// 分类统计：指定车次+日期的各站上下车人数、各区段载客数与票款
 void statistics() {
+    char train_no[8], date[20];
+    printf("车次(G1-G10)：");          scanf("%3s", train_no);
+    printf("出行日期(YYYY-MM-DD)：");   scanf("%10s", date);
+    if (!valid_train_no(train_no) || !valid_date(date)) {
+        printf("车次或日期不合法。\n");
+        return;
+    }
+
     int board_cnt[STATION_COUNT] = {0}, alight_cnt[STATION_COUNT] = {0};
-    int total = 0;
-    Node *t = head;
-    while (t != NULL) {
+    int count = 0;
+    for (Node *t = head; t != NULL; t = t->next) {
+        if (strcmp(t->data.train_no, train_no) != 0) continue;
+        if (strcmp(t->data.travel_date, date) != 0) continue;
         board_cnt[t->data.board]++;
         alight_cnt[t->data.alight]++;
-        total += t->data.price;
-        t = t->next;
+        count++;
     }
     printf("%-6s %-6s %-6s\n", "车站", "上车", "下车");
     for (int i = 0; i < STATION_COUNT; i++)
         printf("%-6s %-6d %-6d\n", stations[i], board_cnt[i], alight_cnt[i]);
-    printf("本趟列车总票款：%d 元\n", total);
+    printf("本车次本日售票 %d 张\n", count);
+
+    printf("%-16s %-6s\n", "区段", "载客");
+    char label[32];
+    for (int i = 0; i < SEGMENT_COUNT; i++) {
+        snprintf(label, sizeof(label), "%s-%s", stations[i], stations[i + 1]);
+        printf("%-16s %-6d\n", label, segment_load(train_no, date, i));
+    }
+    printf("当前在车旅客票款合计：%d 元\n", total_fare());
 }
 
 // 菜单
@@ -181,8 +188,8 @@ void menu() {
     printf("  2. 旅客下车\n");
     printf("  3. 按身份证查询旅客\n");
     printf("  4. 显示全部旅客\n");
-    printf("  5. 按车厢统计\n");
-    printf("  6. 分类统计\n");
+    printf("  5. 按车厢统计（需车次+日期）\n");
+    printf("  6. 分类统计（需车次+日期）\n");
     printf("  0. 退出\n");
     printf("======================================\n");
 }

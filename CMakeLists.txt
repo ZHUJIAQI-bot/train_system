@@ -35,6 +35,6 @@ endif()
 
 if(BUILD_TESTS)
     enable_testing()
-    add_executable(model_tests tests/test_model.c)
+    add_executable(model_tests tests/test_model.c train_model.c)
     add_test(NAME model_tests COMMAND model_tests)
 endif()

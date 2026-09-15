@@ -12,7 +12,9 @@
 #define STATION_COUNT   6                     // 车站数量（0~5）
 #define CARRIAGE_COUNT  5                     // 车厢数量（1~5）
 #define MAX_SEAT        12                    // 每节车厢最多座位数
+#define TRAIN_COUNT     10                    // 车次数量（G1~G10）
 #define MAX_PASSENGERS  10000                 // 存档中允许的最大记录数
+#define SEGMENT_COUNT   (STATION_COUNT - 1)   // 相邻车站构成的区段数（0~4）
 
 typedef struct Passenger {
     char id[5];           // 身份证后4位（字符串，留1位给'\0'）
@@ -64,7 +66,9 @@ extern BTreeNode *btree_root;          // B树索引根
 extern const char *stations[STATION_COUNT];
 extern int car_type[CARRIAGE_COUNT + 1];     // 车厢1~5的类型：1=一等座 2=二等座
 extern int car_seats[CARRIAGE_COUNT + 1];    // 车厢1~5的座位数
-extern int seat_taken[CARRIAGE_COUNT + 1][MAX_SEAT + 1]; // [车厢][座位]=1 表示已售出
+
+/* 注意：座位占用不再是独立状态。seat_taken[][] 已被删除，
+   改为按「车次 + 日期 + 乘车区段」从链表实时派生，见下方座位函数。 */
 
 /* ============================================================
    第3步：操作 —— 一组函数，在这些字段上增删改查
@@ -78,6 +82,44 @@ int valid_id(char *id);
 
 // 校验真实日期，格式为 YYYY-MM-DD
 int valid_date(const char *date);
+
+/* ---------------- 车次 ---------------- */
+// 车次规则：G1~G10。奇数车次 北京(5)→上海(0)，偶数车次 上海(0)→北京(5)
+int  valid_train_no(const char *train_no);              // 形如 G1..G10 返回 1
+int  train_number_of(const char *train_no);             // 解析出 1~10，非法返回 0
+int  train_is_northbound(int train_number);             // 1 = 北京→上海（奇数车次）
+void train_depart_time(int train_number, char out[6]);  // 奇数 :00、偶数 :30，从 06:00 起
+
+/* ---------------- 日期工具 ---------------- */
+void today_string(char out[11]);                 // 写入今天的 YYYY-MM-DD
+void date_offset_string(int offset, char out[11]); // 相对今天偏移若干天
+
+/* ---------------- 行程校验 ---------------- */
+// 统一校验入口：车次、日期、上下车站、方向、等级。
+// 通过返回 1；失败返回 0 并把原因写入 err。
+int validate_trip(const char *train_no, const char *date, int board, int alight,
+                  int firstclass, char *err, size_t errsz);
+
+/* ---------------- 座位：从链表演生，无独立状态 ----------------
+   冲突判定为「同车次 + 同日期 + 同车厢座位，且乘车区段有重叠」。
+   因此 上海→南京 与 济南→北京 可以复用同一个座位。 */
+int seat_segments_overlap(int board_a, int alight_a, int board_b, int alight_b);
+int seat_available(const char *train_no, const char *date,
+                   int carriage, int seat, int board, int alight);
+int seats_available(const char *train_no, const char *date, int firstclass,
+                    int board, int alight);
+// 选余票最多的合格车厢，再取该车厢最小可用座位号；成功返回 1
+int assign_seat(const char *train_no, const char *date, int firstclass,
+                int board, int alight, int *out_carriage, int *out_seat);
+
+/* ---------------- 统计 ---------------- */
+int passenger_count(void);
+int total_fare(void);                                            // 当前在车旅客票款合计
+int segment_load(const char *train_no, const char *date, int segment); // 覆盖该区段的人数
+int carriage_fully_free_seats(const char *train_no, const char *date, int carriage);
+int carriage_occupied_seats(const char *train_no, const char *date, int carriage);
+int occupied_seat_total(const char *date);                       // 去重 车次×车厢×座位
+int indexes_are_consistent(void);                                // 诊断：两棵索引与链表是否一致
 
 /* ---------------- 链表与索引 ---------------- */
 int   insert_passenger(Passenger p);          // 尾插，返回 0 表示内存分配失败

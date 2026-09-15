@@ -20,7 +20,6 @@ static const Color CNR_MUTED = {91, 112, 132, 255};
 static const Color CNR_BORDER = {211, 225, 237, 255};
 static const Color CNR_HEADER_TEXT = {224, 241, 255, 255};
 static const Color CNR_STATUS = {34, 116, 160, 255};
-static const Color CNR_COVER_SUBTITLE = {44, 80, 112, 255};
 static const Color CNR_ERROR = {190, 67, 74, 255};
 static const Color COVER_TOP = {225, 242, 255, 255};
 static const Color COVER_BOTTOM = {255, 255, 255, 255};
@@ -255,31 +254,25 @@ static void draw_sidebar(View view) {
 }
 
 static void draw_dashboard(void) {
-    int passenger_count = 0;
-    for (Node *node = head; node != NULL; node = node->next) {
-        passenger_count++;
-    }
+    char today[11];
+    today_string(today);
 
     DrawText(tr("运行总览", "Dashboard"), CONTENT_X, 42, 34, CNR_TEXT);
     DrawText(tr("今日列车运行情况", "Today's train operation at a glance"), CONTENT_X + 2, 84, 18, CNR_MUTED);
 
     DrawRectangleRounded((Rectangle){CONTENT_X, 140, 290, 128}, 0.06f, 6, WHITE);
     DrawRectangleLinesEx((Rectangle){CONTENT_X, 140, 290, 128}, 1, CNR_BORDER);
-    DrawText(tr("当前在车", "ON BOARD"), CONTENT_X + 22, 164, 16, CNR_RED);
-    DrawText(TextFormat("%d", passenger_count), CONTENT_X + 22, 196, 42, CNR_TEXT);
-    DrawText(tr("名旅客", "passengers"), CONTENT_X + 24, 242, 16, CNR_MUTED);
+    // 链表中含未来日期的票，故不写「当前在车」
+    DrawText(tr("售票总数", "TICKETS SOLD"), CONTENT_X + 22, 164, 16, CNR_RED);
+    DrawText(TextFormat("%d", passenger_count()), CONTENT_X + 22, 196, 42, CNR_TEXT);
+    DrawText(tr("张", "tickets"), CONTENT_X + 24, 242, 16, CNR_MUTED);
 
     DrawRectangleRounded((Rectangle){CONTENT_X + 320, 140, 290, 128}, 0.06f, 6, WHITE);
     DrawRectangleLinesEx((Rectangle){CONTENT_X + 320, 140, 290, 128}, 1, CNR_BORDER);
-    DrawText(tr("剩余座位", "SEATS LEFT"), CONTENT_X + 342, 164, 16, CNR_RED);
-    int seats_left = 0;
-    for (int c = 1; c <= 5; c++) {
-        for (int s = 1; s <= car_seats[c]; s++) {
-            if (!seat_taken[c][s]) seats_left++;
-        }
-    }
-    DrawText(TextFormat("%d", seats_left), CONTENT_X + 342, 196, 42, CNR_TEXT);
-    DrawText(tr("个可用座位", "available seats"), CONTENT_X + 344, 242, 16, CNR_MUTED);
+    // 区段复用下「剩余座位」没有单一定义，改为按车次去重的已占用座位数
+    DrawText(tr("今日已占用座位", "SEATS TAKEN TODAY"), CONTENT_X + 342, 164, 16, CNR_RED);
+    DrawText(TextFormat("%d", occupied_seat_total(today)), CONTENT_X + 342, 196, 42, CNR_TEXT);
+    DrawText(tr("个（按车次去重）", "seat-slots booked"), CONTENT_X + 344, 242, 16, CNR_MUTED);
 
     DrawText(tr("快捷操作", "Quick actions"), CONTENT_X, 334, 24, CNR_TEXT);
     DrawText(tr("管理车票、旅客和座位信息。", "Manage tickets, passengers, and seat availability."), CONTENT_X, 372, 17, CNR_MUTED);
@@ -417,7 +410,7 @@ static void draw_sell_view(TextField *fields) {
         } else {
             int board = atoi(fields[2].text);
             for (int i = 0; i < option_count; i++) {
-                char train_text[16];
+                char train_text[32];
                 int train_number = board > atoi(fields[3].text) ? i * 2 + 1 : i * 2 + 2;
                 snprintf(train_text, sizeof(train_text), "G%d   %02d:%02d",
                          train_number, 6 + i, board > atoi(fields[3].text) ? 0 : 30);
@@ -436,8 +429,7 @@ static bool gui_sell_ticket(TextField *fields, char *status, size_t status_size)
     int board = atoi(fields[2].text);
     int alight = atoi(fields[3].text);
     int firstclass = atoi(fields[4].text);
-    int train_number = 0;
-    char depart_time[6] = "";
+    char err[160];
 
     if (!valid_id(fields[0].text)) {
         snprintf(status, status_size, "%s", tr("身份证后4位格式不正确。", "Invalid ID suffix."));
@@ -447,37 +439,21 @@ static bool gui_sell_ticket(TextField *fields, char *status, size_t status_size)
         snprintf(status, status_size, "%s", tr("请输入姓名。", "Name is required."));
         return false;
     }
-    if (board < 0 || board > 5 || alight < 0 || alight > 5) {
-        snprintf(status, status_size, "%s", tr("车站编号必须在0到5之间。", "Station must be between 0 and 5."));
-        return false;
-    }
-    if (board == alight) {
-        snprintf(status, status_size, "%s", tr("上车站和下车站不能相同。", "Board and alight stations must differ."));
+    // atoi("") 会返回 0（恰好等于「上海」），必须先挡掉空输入
+    if (!is_integer_text(fields[2].text) || !is_integer_text(fields[3].text)) {
+        snprintf(status, status_size, "%s",
+                 tr("请选择上车站和下车站。", "Select board and alight stations."));
         return false;
     }
     if (firstclass != 0 && firstclass != 1) {
         snprintf(status, status_size, "%s", tr("座位等级只能是0或1。", "Class must be 0 or 1."));
         return false;
     }
-    if (!valid_date(fields[5].text)) {
-        snprintf(status, status_size, "%s", tr("日期格式应为YYYY-MM-DD。", "Use date format YYYY-MM-DD."));
+    // 车次格式、日期、车站范围、行程方向 全部交给模型层统一校验
+    if (!validate_trip(fields[6].text, fields[5].text, board, alight, firstclass,
+                       err, sizeof(err))) {
+        snprintf(status, status_size, "%s", err);
         return false;
-    }
-    if (fields[6].text[0] != 'G' || !is_integer_text(fields[6].text + 1)) {
-        snprintf(status, status_size, "%s", tr("请输入有效车次。", "Enter a valid train number."));
-        return false;
-    }
-    train_number = atoi(fields[6].text + 1);
-    if (train_number < 1 || train_number > 10 ||
-        (board > alight && train_number % 2 != 1) ||
-        (board < alight && train_number % 2 != 0)) {
-        snprintf(status, status_size, "%s", tr("车次与行程方向不匹配。", "Train does not match the route direction."));
-        return false;
-    }
-    if (board > alight) {
-        snprintf(depart_time, sizeof(depart_time), "%02d:00", 6 + (train_number - 1) / 2);
-    } else {
-        snprintf(depart_time, sizeof(depart_time), "%02d:30", 6 + (train_number - 2) / 2);
     }
     if (search_passenger(fields[0].text) != NULL) {
         snprintf(status, status_size, "%s", tr("该身份证已经购票。", "This ID already has a ticket."));
@@ -486,28 +462,21 @@ static bool gui_sell_ticket(TextField *fields, char *status, size_t status_size)
 
     int carriage = -1;
     int seat = -1;
-    for (int c = 1; c <= 5 && carriage == -1; c++) {
-        if (car_type[c] != (firstclass ? 1 : 2)) continue;
-        for (int s = 1; s <= car_seats[c]; s++) {
-            if (!seat_taken[c][s]) {
-                carriage = c;
-                seat = s;
-                break;
-            }
-        }
-    }
-    if (carriage == -1) {
-        snprintf(status, status_size, "%s", tr("该等级座位已售罄。", "No seats available for this class."));
+    if (!assign_seat(fields[6].text, fields[5].text, firstclass, board, alight,
+                     &carriage, &seat)) {
+        snprintf(status, status_size, "%s",
+                 tr("该区间该等级座位已售罄。", "No seats left for this class on this leg."));
         return false;
     }
 
     Passenger passenger = {0};
-    strcpy(passenger.id, fields[0].text);
+    strncpy(passenger.id, fields[0].text, sizeof(passenger.id) - 1);
     strncpy(passenger.name, fields[1].text, sizeof(passenger.name) - 1);
-    passenger.name[sizeof(passenger.name) - 1] = '\0';
-    strcpy(passenger.travel_date, fields[5].text);
-    strcpy(passenger.train_no, fields[6].text);
-    strcpy(passenger.depart_time, depart_time);
+    strncpy(passenger.travel_date, fields[5].text, sizeof(passenger.travel_date) - 1);
+    // 限宽拷贝：validate_trip 已保证车次形如 G1~G10（最长3字符），
+    // 但仍限定长度，避免任何绕过校验的路径再次触发栈溢出
+    strncpy(passenger.train_no, fields[6].text, sizeof(passenger.train_no) - 1);
+    train_depart_time(train_number_of(passenger.train_no), passenger.depart_time);
     passenger.board = board;
     passenger.alight = alight;
     passenger.firstclass = firstclass;
@@ -519,7 +488,6 @@ static bool gui_sell_ticket(TextField *fields, char *status, size_t status_size)
         snprintf(status, status_size, "%s", tr("无法分配旅客信息内存。", "Could not allocate passenger memory."));
         return false;
     }
-    seat_taken[carriage][seat] = 1;
     if (!save_passengers(DATA_FILE)) {
         snprintf(status, status_size, "%s", tr("购票成功，但数据保存失败。", "Ticket sold, but saving failed."));
         return false;
@@ -563,21 +531,92 @@ static void draw_passengers_view(void) {
     if (row == 0) DrawText(tr("暂无旅客。", "No passengers yet."), PANEL_X + 42, 184, 18, CNR_MUTED);
 }
 
+/* 统计视图：区段复用下「已售 N/12」会出现超过总座位数的自相矛盾数字，
+   因此改为展示「全程空座 / 已占用」这一划分，以及各区段的实际载客数。 */
+static int stats_train_number = 1;
+static int stats_date_option = 0;
+
+static Rectangle stats_date_button(int i) {
+    return (Rectangle){PANEL_X + 106 + i * 122, 118, 116, 32};
+}
+
+static Rectangle stats_train_button(int i) {
+    return (Rectangle){PANEL_X + 106 + i * 74, 162, 68, 32};
+}
+
 static void draw_stats_view(void) {
+    char date[11];
+    char train_no[6];
+    date_offset_string(stats_date_option, date);
+    snprintf(train_no, sizeof(train_no), "G%d", stats_train_number);
+
+    int total_seats = 0;
+    for (int c = 1; c <= CARRIAGE_COUNT; c++) total_seats += car_seats[c];
+
     DrawText(tr("统计信息", "Statistics"), PANEL_X + 42, 42, 34, CNR_TEXT);
-    DrawText(tr("各车厢座位分布", "Seat distribution by carriage"), PANEL_X + 44, 84, 18, CNR_MUTED);
-    for (int c = 1; c <= 5; c++) {
-        int taken = 0;
-        for (int s = 1; s <= car_seats[c]; s++) taken += seat_taken[c][s] != 0;
-        int y = 150 + (c - 1) * 72;
+    DrawText(tr("按车次与日期统计", "Per train and date"), PANEL_X + 44, 84, 18, CNR_MUTED);
+
+    DrawText(tr("日期", "DATE"), PANEL_X + 42, 126, 16, CNR_RED);
+    for (int i = 0; i < 4; i++) {
+        char label[11];
+        date_offset_string(i, label);
+        button(stats_date_button(i), label, i == stats_date_option);
+    }
+    DrawText(tr("车次", "TRAIN"), PANEL_X + 42, 170, 16, CNR_RED);
+    for (int i = 0; i < TRAIN_COUNT; i++) {
+        char label[6];
+        snprintf(label, sizeof(label), "G%d", i + 1);
+        button(stats_train_button(i), label, i + 1 == stats_train_number);
+    }
+
+    int y = 218;
+    DrawText(tr("各车厢座位", "Seats by carriage"), PANEL_X + 42, y, 20, CNR_TEXT);
+    y += 32;
+    for (int c = 1; c <= CARRIAGE_COUNT; c++) {
+        int used = carriage_occupied_seats(train_no, date, c);
+        int fully_free = carriage_fully_free_seats(train_no, date, c);
+        char label[28];
+        char detail[56];
         if (language == LANGUAGE_ZH) {
-            DrawText(TextFormat("%d号车厢", c), PANEL_X + 42, y, 18, CNR_TEXT);
+            snprintf(label, sizeof(label), "%d号车厢", c);
+            snprintf(detail, sizeof(detail), "共%d座  空%d  占%d",
+                     car_seats[c], fully_free, used);
         } else {
-            DrawText(TextFormat("Carriage %d", c), PANEL_X + 42, y, 18, CNR_TEXT);
+            snprintf(label, sizeof(label), "Carriage %d", c);
+            snprintf(detail, sizeof(detail), "%d seats  %d free  %d used",
+                     car_seats[c], fully_free, used);
         }
-        DrawRectangle(PANEL_X + 170, y + 3, 430, 22, CNR_BORDER);
-        DrawRectangle(PANEL_X + 170, y + 3, (int)(430.0f * taken / car_seats[c]), 22, CNR_RED);
-        DrawText(language == LANGUAGE_ZH ? TextFormat("已售 %d / %d", taken, car_seats[c]) : TextFormat("%d / %d sold", taken, car_seats[c]), PANEL_X + 620, y + 2, 17, CNR_MUTED);
+        DrawText(label, PANEL_X + 42, y, 17, CNR_TEXT);
+        DrawRectangle(PANEL_X + 170, y + 3, 330, 20, CNR_BORDER);
+        if (used > 0) {
+            DrawRectangle(PANEL_X + 170, y + 3,
+                          (int)(330.0f * used / car_seats[c]), 20, CNR_RED);
+        }
+        DrawText(detail, PANEL_X + 512, y + 1, 15, CNR_MUTED);
+        y += 30;
+    }
+
+    y += 14;
+    DrawText(tr("各区段载客", "Passengers per segment"), PANEL_X + 42, y, 20, CNR_TEXT);
+    y += 30;
+    for (int i = 0; i < SEGMENT_COUNT; i++) {
+        char label[40];
+        char detail[32];
+        int load = segment_load(train_no, date, i);
+        if (language == LANGUAGE_ZH) {
+            snprintf(label, sizeof(label), "%s-%s", stations[i], stations[i + 1]);
+        } else {
+            snprintf(label, sizeof(label), "%s-%s", gui_stations[i], gui_stations[i + 1]);
+        }
+        snprintf(detail, sizeof(detail), "%d / %d", load, total_seats);
+        DrawText(label, PANEL_X + 42, y, 16, CNR_TEXT);
+        DrawRectangle(PANEL_X + 250, y + 2, 250, 18, CNR_BORDER);
+        if (load > 0) {
+            DrawRectangle(PANEL_X + 250, y + 2,
+                          (int)(250.0f * load / total_seats), 18, CNR_RED);
+        }
+        DrawText(detail, PANEL_X + 512, y, 15, CNR_MUTED);
+        y += 28;
     }
 }
 
@@ -738,6 +777,14 @@ int main(void) {
             }
             if (view == VIEW_DASHBOARD && CheckCollisionPointRec(mouse, (Rectangle){CONTENT_X + 205, 414, 240, 48})) {
                 view = VIEW_SELL;
+            }
+            if (view == VIEW_STATS) {
+                for (int i = 0; i < 4; i++) {
+                    if (CheckCollisionPointRec(mouse, stats_date_button(i))) stats_date_option = i;
+                }
+                for (int i = 0; i < TRAIN_COUNT; i++) {
+                    if (CheckCollisionPointRec(mouse, stats_train_button(i))) stats_train_number = i + 1;
+                }
             }
             if (view == VIEW_SELL) {
                 bool station_dropdown_handled = false;
