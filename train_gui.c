@@ -63,8 +63,10 @@ static const char *tr(const char *chinese, const char *english) {
 }
 
 static void set_language(Language selected) {
+    // 中文字体没加载成功时强制用英文，否则整个界面会是一片方块
+    if (selected == LANGUAGE_ZH && !chinese_font_loaded) selected = LANGUAGE_EN;
     language = selected;
-    if (language == LANGUAGE_ZH && chinese_font_loaded) {
+    if (language == LANGUAGE_ZH) {
         ui_font = chinese_font;
     } else if (english_font_loaded) {
         ui_font = english_font;
@@ -73,15 +75,82 @@ static void set_language(Language selected) {
     }
 }
 
+/* 候选字体路径：依次尝试，用第一个能加载成功的。
+   原先只写死 C:/Windows/Fonts/...，换台机器缺字体就整屏显示成方块。 */
+static const char *const chinese_font_candidates[] = {
+    "C:/Windows/Fonts/simhei.ttf",                          // 黑体
+    "C:/Windows/Fonts/msyh.ttc",                            // 微软雅黑
+    "C:/Windows/Fonts/msyh.ttf",
+    "C:/Windows/Fonts/simsun.ttc",                          // 宋体
+    "C:/Windows/Fonts/msjh.ttc",                            // 微软正黑
+    "C:/Windows/Fonts/arialuni.ttf",                        // Arial Unicode MS
+    "/System/Library/Fonts/PingFang.ttc",                   // macOS
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", // Linux
+    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+};
+
+static const char *const latin_font_candidates[] = {
+    "C:/Windows/Fonts/timesbd.ttf",
+    "C:/Windows/Fonts/georgia.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+};
+
+/* 依次尝试候选路径，把第一个加载成功的字体写入 out 并返回 1。
+   全部失败时 out 落到默认字体并返回 0 —— 这里不能靠 texture.id != 0 判断成败，
+   因为默认字体本身也有有效纹理，那样会把「加载失败」误判成成功。 */
+static int try_load_font(const char *const *candidates, int candidate_count,
+                         int *codepoints, int codepoint_count, Font *out) {
+    for (int i = 0; i < candidate_count; i++) {
+        if (!FileExists(candidates[i])) continue;
+        Font font = LoadFontEx(candidates[i], 32, codepoints, codepoint_count);
+        if (font.texture.id != 0) {
+            *out = font;
+            return 1;
+        }
+    }
+    *out = GetFontDefault();
+    return 0;
+}
+
+/* 中文字形有 21391 个，32 像素基准下 raylib 会生成 8192×8192 的图集（约 67MB 显存）。
+   8192 已经是不少 GPU 的上限，换台老机器就会加载失败、整屏中文变方块。
+   这里按 32 → 24 → 16 递减基准字号重试：字号越小图集越小（16 像素时约 4096×4096），
+   代价是文字放大后略糊。宁可降画质也不要丢字形 ——
+   字形集合不能裁，因为旅客姓名是用户自由输入的。 */
+static int load_chinese_font(int *codepoints, int codepoint_count, Font *out) {
+    static const int sizes[] = {32, 24, 16};
+    int candidate_count = (int)(sizeof(chinese_font_candidates) /
+                                sizeof(chinese_font_candidates[0]));
+    for (size_t s = 0; s < sizeof(sizes) / sizeof(sizes[0]); s++) {
+        for (int i = 0; i < candidate_count; i++) {
+            if (!FileExists(chinese_font_candidates[i])) continue;
+            Font font = LoadFontEx(chinese_font_candidates[i], sizes[s],
+                                   codepoints, codepoint_count);
+            if (font.texture.id != 0) {
+                *out = font;
+                return 1;
+            }
+        }
+    }
+    *out = GetFontDefault();
+    return 0;
+}
+
 static void load_ui_fonts(void) {
     int ascii_codepoints[95];
     for (int i = 0; i < 95; i++) {
         ascii_codepoints[i] = 32 + i;
     }
-    english_font = LoadFontEx("C:/Windows/Fonts/timesbd.ttf", 32,
-                              ascii_codepoints, 95);
-    english_font_loaded = english_font.texture.id != 0;
+    english_font_loaded = try_load_font(
+        latin_font_candidates,
+        (int)(sizeof(latin_font_candidates) / sizeof(latin_font_candidates[0])),
+        ascii_codepoints, 95, &english_font);
 
+    /* 字形集合刻意保持为「ASCII + 全部 CJK 基本区 + 中文标点 + 全角字符」，
+       而不是只收界面里用到的几十个字：
+       界面虽只有约 70 个中文字，但旅客姓名是用户自由输入的，
+       裁剪字形集合会让任意中文姓名渲染成方块。 */
     int cjk_start = 0x4e00;
     int cjk_end = 0x9fff;
     int punctuation_start = 0x3000;
@@ -105,9 +174,9 @@ static void load_ui_fonts(void) {
     for (int i = 0; i <= fullwidth_end - fullwidth_start; i++) {
         chinese_codepoints[offset + i] = fullwidth_start + i;
     }
-    chinese_font = LoadFontEx("C:/Windows/Fonts/simhei.ttf", 32,
-                              chinese_codepoints, chinese_codepoint_count);
-    chinese_font_loaded = chinese_font.texture.id != 0;
+    chinese_font_loaded = load_chinese_font(chinese_codepoints,
+                                            chinese_codepoint_count,
+                                            &chinese_font);
     if (english_font_loaded) SetTextureFilter(english_font.texture, TEXTURE_FILTER_BILINEAR);
     if (chinese_font_loaded) SetTextureFilter(chinese_font.texture, TEXTURE_FILTER_BILINEAR);
     MemFree(chinese_codepoints);
@@ -505,35 +574,83 @@ static bool gui_sell_ticket(TextField *fields, char *status, size_t status_size)
     return true;
 }
 
+/* 旅客列表：可滚动（鼠标滚轮），每行带一个「退票」按钮。
+   点击退票时不立即删除 —— delete_passenger 会 free 掉该结点，
+   若在同一帧继续解引用就是 use-after-free。改为先把 id 拷进缓冲区，
+   等本帧绘制结束（EndDrawing 之后）再统一执行删除与落盘。 */
+#define PASSENGER_ROW_HEIGHT  36
+#define PASSENGER_LIST_TOP    172
+#define PASSENGER_LIST_BOTTOM (WINDOW_HEIGHT - 66)
+#define PASSENGER_VISIBLE_ROWS \
+    ((PASSENGER_LIST_BOTTOM - PASSENGER_LIST_TOP) / PASSENGER_ROW_HEIGHT)
+
+static float passenger_scroll = 0.0f;
+static char  pending_refund_id[8];
+static bool  has_pending_refund = false;
+
+static Rectangle refund_button_bounds(int y) {
+    return (Rectangle){WINDOW_WIDTH - 136, (float)(y + 2), 96, 24};
+}
+
 static void draw_passengers_view(void) {
+    int total = passenger_count();
+    int visible = PASSENGER_VISIBLE_ROWS;
+    int max_scroll = total > visible ? total - visible : 0;
+    if (passenger_scroll > (float)max_scroll) passenger_scroll = (float)max_scroll;
+    if (passenger_scroll < 0.0f) passenger_scroll = 0.0f;
+    int first = (int)passenger_scroll;
+
     DrawText(tr("旅客列表", "Passengers"), PANEL_X + 42, 42, 34, CNR_TEXT);
-    DrawText(tr("当前在车旅客", "Current passengers on board"), PANEL_X + 44, 84, 18, CNR_MUTED);
+    DrawText(TextFormat(tr("共 %d 名旅客", "%d passengers on record"), total),
+             PANEL_X + 44, 84, 18, CNR_MUTED);
     DrawText(tr("证件", "ID"), PANEL_X + 42, 138, 16, CNR_RED);
-    DrawText(tr("姓名", "NAME"), PANEL_X + 130, 138, 16, CNR_RED);
-    DrawText(tr("行程", "ROUTE"), PANEL_X + 300, 138, 16, CNR_RED);
+    DrawText(tr("姓名", "NAME"), PANEL_X + 128, 138, 16, CNR_RED);
+    DrawText(tr("行程", "ROUTE"), PANEL_X + 296, 138, 16, CNR_RED);
     DrawText(tr("车次", "TRAIN"), PANEL_X + 500, 138, 16, CNR_RED);
-    DrawText(tr("日期", "DATE"), PANEL_X + 575, 138, 16, CNR_RED);
-    DrawText(tr("车厢/座位", "CARRIAGE/SEAT"), PANEL_X + 690, 138, 16, CNR_RED);
+    DrawText(tr("日期", "DATE"), PANEL_X + 570, 138, 16, CNR_RED);
+    DrawText(tr("车厢/座位", "CARRIAGE/SEAT"), PANEL_X + 660, 138, 16, CNR_RED);
+    DrawText(tr("操作", "ACTION"), WINDOW_WIDTH - 136, 138, 16, CNR_RED);
+
+    // 裁掉列表区域之外的内容，滚动时行不会画到标题或状态栏上
+    BeginScissorMode(PANEL_X + 40, PASSENGER_LIST_TOP,
+                     WINDOW_WIDTH - PANEL_X - 80,
+                     PASSENGER_LIST_BOTTOM - PASSENGER_LIST_TOP);
 
     int row = 0;
-    for (Node *node = head; node != NULL && row < 12; node = node->next, row++) {
-        int y = 174 + row * 36;
+    for (Node *node = head; node != NULL; node = node->next, row++) {
+        if (row < first) continue;
+        if (row >= first + visible) break;
+        int y = PASSENGER_LIST_TOP + (row - first) * PASSENGER_ROW_HEIGHT;
         DrawLine(PANEL_X + 42, y + 25, WINDOW_WIDTH - 44, y + 25, CNR_BORDER);
         DrawText(node->data.id, PANEL_X + 42, y, 17, CNR_TEXT);
-        draw_passenger_name(node->data.name, PANEL_X + 130, y, 17, CNR_TEXT);
+        draw_passenger_name(node->data.name, PANEL_X + 128, y, 17, CNR_TEXT);
         if (language == LANGUAGE_ZH) {
-            DrawText(TextFormat("%s -> %s", stations[node->data.board], stations[node->data.alight]), PANEL_X + 300, y, 17, CNR_TEXT);
+            DrawText(TextFormat("%s -> %s", stations[node->data.board], stations[node->data.alight]),
+                     PANEL_X + 296, y, 17, CNR_TEXT);
         } else {
-            DrawText(TextFormat("%s -> %s", gui_stations[node->data.board], gui_stations[node->data.alight]), PANEL_X + 300, y, 17, CNR_TEXT);
+            DrawText(TextFormat("%s -> %s", gui_stations[node->data.board], gui_stations[node->data.alight]),
+                     PANEL_X + 296, y, 17, CNR_TEXT);
         }
         DrawText(node->data.train_no, PANEL_X + 500, y, 17, CNR_TEXT);
-        DrawText(node->data.travel_date, PANEL_X + 575, y, 15, CNR_TEXT);
+        DrawText(node->data.travel_date, PANEL_X + 570, y, 15, CNR_TEXT);
         DrawText(language == LANGUAGE_ZH
                      ? TextFormat("%d车 / %d号", node->data.carriage, node->data.seat)
                      : TextFormat("Car %d / Seat %d", node->data.carriage, node->data.seat),
-                 PANEL_X + 690, y, 17, CNR_TEXT);
+                 PANEL_X + 660, y, 17, CNR_TEXT);
+
+        if (button(refund_button_bounds(y), tr("退票", "Refund"), false)) {
+            snprintf(pending_refund_id, sizeof(pending_refund_id), "%s", node->data.id);
+            has_pending_refund = true;
+        }
     }
-    if (row == 0) DrawText(tr("暂无旅客。", "No passengers yet."), PANEL_X + 42, 184, 18, CNR_MUTED);
+    EndScissorMode();
+
+    if (total == 0) {
+        DrawText(tr("暂无旅客。", "No passengers yet."), PANEL_X + 42, PASSENGER_LIST_TOP + 10, 18, CNR_MUTED);
+    } else if (max_scroll > 0) {
+        DrawText(tr("滚轮可滚动列表", "Scroll with the mouse wheel"),
+                 PANEL_X + 42, PASSENGER_LIST_BOTTOM + 10, 15, CNR_MUTED);
+    }
 }
 
 /* 统计视图：区段复用下「已售 N/12」会出现超过总座位数的自相矛盾数字，
@@ -768,6 +885,13 @@ int main(void) {
                          expired_count);
             }
         }
+        if (view == VIEW_PASSENGERS) {
+            float wheel = GetMouseWheelMove();
+            if (wheel != 0.0f) {
+                passenger_scroll -= wheel;
+                if (passenger_scroll < 0.0f) passenger_scroll = 0.0f;
+            }
+        }
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
             Vector2 mouse = GetMousePosition();
             if (view == VIEW_COVER && CheckCollisionPointRec(mouse, (Rectangle){CONTENT_X + 150, 410, 250, 58})) {
@@ -946,6 +1070,25 @@ int main(void) {
             DrawText(status, CONTENT_X, WINDOW_HEIGHT - 42, 16, CNR_STATUS);
         }
         EndDrawing();
+
+        // 退票在绘制结束后统一处理：此时已没有任何代码持有该结点指针
+        if (has_pending_refund) {
+            has_pending_refund = false;
+            char refunded[8];
+            snprintf(refunded, sizeof(refunded), "%s", pending_refund_id);
+            if (delete_passenger(refunded)) {
+                if (save_passengers(DATA_FILE)) {
+                    snprintf(status, sizeof(status),
+                             tr("旅客 %s 已退票。", "Passenger %s refunded."), refunded);
+                } else {
+                    snprintf(status, sizeof(status), "%s",
+                             tr("退票已生效，但保存失败。", "Refund applied, but saving failed."));
+                }
+            } else {
+                snprintf(status, sizeof(status), "%s",
+                         tr("未找到该旅客，退票失败。", "Passenger not found."));
+            }
+        }
     }
 
     // 只有成功加载过（或首次运行）才写回，避免用空表覆盖掉刚被拒收的存档
