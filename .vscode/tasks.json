@@ -2,12 +2,25 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "构建：全部（GUI + 控制台 + 测试）",
-            "type": "shell",
-            "command": "cmake -S . -B build-gui && cmake --build build-gui",
+            "label": "配置 CMake（GUI 构建目录）",
+            "type": "process",
+            "command": "cmake",
+            "args": ["-S", ".", "-B", "build-gui"],
             "options": {
                 "cwd": "${workspaceFolder}"
             },
+            "problemMatcher": []
+        },
+        {
+            "label": "构建：全部（GUI + 控制台 + 测试）",
+            "type": "process",
+            "command": "cmake",
+            "args": ["--build", "build-gui"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": ["配置 CMake（GUI 构建目录）"],
+            "dependsOrder": "sequence",
             "group": {
                 "kind": "build",
                 "isDefault": true
@@ -15,42 +28,58 @@
             "problemMatcher": "$gcc"
         },
         {
-            "label": "构建：仅控制台与测试（不拉 raylib，可完全离线）",
-            "type": "shell",
-            "command": "cmake -S . -B build-console -G Ninja -DBUILD_GUI=OFF -DBUILD_TESTS=ON && cmake --build build-console",
+            "label": "配置 CMake（离线构建目录，不拉 raylib）",
+            "type": "process",
+            "command": "cmake",
+            "args": ["-S", ".", "-B", "build-console", "-G", "Ninja", "-DBUILD_GUI=OFF", "-DBUILD_TESTS=ON"],
             "options": {
                 "cwd": "${workspaceFolder}"
             },
+            "problemMatcher": []
+        },
+        {
+            "label": "构建：仅控制台与测试（可离线）",
+            "type": "process",
+            "command": "cmake",
+            "args": ["--build", "build-console"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "dependsOn": ["配置 CMake（离线构建目录，不拉 raylib）"],
+            "dependsOrder": "sequence",
             "problemMatcher": "$gcc"
         },
         {
             "label": "运行：GUI 版",
-            "type": "shell",
+            "type": "process",
             "command": "${workspaceFolder}/build-gui/train_gui.exe",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "dependsOn": "构建：全部（GUI + 控制台 + 测试）",
+            "dependsOn": ["构建：全部（GUI + 控制台 + 测试）"],
+            "dependsOrder": "sequence",
             "problemMatcher": []
         },
         {
             "label": "运行：控制台版",
-            "type": "shell",
+            "type": "process",
             "command": "${workspaceFolder}/build-gui/train_console.exe",
             "options": {
                 "cwd": "${workspaceFolder}"
             },
-            "dependsOn": "构建：全部（GUI + 控制台 + 测试）",
+            "dependsOn": ["构建：全部（GUI + 控制台 + 测试）"],
+            "dependsOrder": "sequence",
             "problemMatcher": []
         },
         {
             "label": "运行：单元测试",
-            "type": "shell",
+            "type": "process",
             "command": "${workspaceFolder}/build-gui/model_tests.exe",
             "options": {
                 "cwd": "${workspaceFolder}/build-gui"
             },
-            "dependsOn": "构建：全部（GUI + 控制台 + 测试）",
+            "dependsOn": ["构建：全部（GUI + 控制台 + 测试）"],
+            "dependsOrder": "sequence",
             "problemMatcher": []
         }
     ]
