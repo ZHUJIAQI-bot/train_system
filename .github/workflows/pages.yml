@@ -1,0 +1,65 @@
+name: Build & Deploy Web Version
+
+# 只在网页版相关文件变动时触发，避免改动 GUI 版也白白跑一遍 1GB 的工具链下载
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - 'train_model.c'
+      - 'train_model.h'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+# 这些权限是逐作业覆盖仓库默认设置的，所以仓库 Actions 默认权限设为只读也不影响
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# cancel-in-progress 必须为 false：true 会在部署中途打断，留下半成品站点
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 原生测试闸门：模型层是两个前端共用的，
+      # 模型被改坏时不该让它上线。这是唯一能自动守住「网页版与桌面版行为一致」的手段。
+      - name: 运行模型层单元测试
+        run: |
+          cmake -S . -B build-ci -DBUILD_GUI=OFF -DBUILD_TESTS=ON
+          cmake --build build-ci
+          ctest --test-dir build-ci --output-on-failure
+
+      # 版本必须精确固定：用 latest 会让某天的构建突然产出不同的 wasm
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: 3.1.64
+
+      - name: 构建网页版
+        run: bash web/build.sh
+
+      - name: 冒烟测试（Node 无头运行同一份 wasm）
+        run: node web/test/smoke.mjs
+
+      - uses: actions/configure-pages@v5
+
+      # dist/ 被 gitignore 不影响发布：这个动作从工作区磁盘打包，不读 git
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

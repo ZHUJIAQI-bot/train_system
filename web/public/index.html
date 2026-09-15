@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>高铁列车旅客管理系统</title>
+<!-- 所有资源一律用相对路径：这是 GitHub Pages 的子路径项目页，
+     任何以 / 开头的路径都会 404。 -->
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<!-- 熔断警告：存档被拒收或保存失败时显示，不会自动消失 -->
+<div id="banner" class="banner" hidden>
+  <div class="banner-text">
+    <strong id="banner-title"></strong>
+    <span id="banner-detail"></span>
+  </div>
+  <div class="banner-actions">
+    <button id="banner-export" class="btn-ghost"></button>
+    <button id="banner-restart" class="btn-ghost"></button>
+    <button id="banner-dismiss" class="btn-ghost"></button>
+  </div>
+</div>
+
+<header class="app-header">
+  <div class="brand">
+    <span class="brand-main" data-i18n="brand">中国铁路</span>
+    <span class="brand-sub" data-i18n="brandSub">旅客管理系统 · 网页版</span>
+  </div>
+  <button id="lang-toggle" class="btn-ghost">English</button>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab is-active" data-view="sell" data-i18n="tabSell">售票</button>
+  <button class="tab" data-view="passengers" data-i18n="tabPassengers">旅客列表</button>
+  <button class="tab" data-view="stats" data-i18n="tabStats">统计信息</button>
+</nav>
+
+<main class="content">
+
+  <!-- ==================== 售票 ==================== -->
+  <section class="view is-active" id="view-sell">
+    <h2 class="view-title" data-i18n="sellTitle">售票</h2>
+    <p class="view-hint" data-i18n="sellHint">填写旅客信息，系统自动分配座位。</p>
+
+    <form id="sell-form" class="form-grid" novalidate>
+      <label class="field">
+        <span data-i18n="fId">身份证后 4 位</span>
+        <input type="text" id="f-id" inputmode="numeric" autocomplete="off"
+               maxlength="4" placeholder="1234">
+        <small class="field-note" data-i18n="fIdNote">4 位半角数字，末位可为 x</small>
+      </label>
+
+      <label class="field">
+        <span data-i18n="fName">姓名</span>
+        <input type="text" id="f-name" autocomplete="off" maxlength="19">
+        <small class="field-note" id="name-note"></small>
+      </label>
+
+      <label class="field">
+        <span data-i18n="fDate">出行日期</span>
+        <select id="f-date"></select>
+      </label>
+
+      <label class="field">
+        <span data-i18n="fTrain">车次</span>
+        <select id="f-train"></select>
+        <small class="field-note" id="train-note"></small>
+      </label>
+
+      <label class="field">
+        <span data-i18n="fBoard">上车站</span>
+        <select id="f-board"></select>
+      </label>
+
+      <label class="field">
+        <span data-i18n="fAlight">下车站</span>
+        <select id="f-alight"></select>
+      </label>
+
+      <label class="field">
+        <span data-i18n="fClass">座位等级</span>
+        <select id="f-class">
+          <option value="0" data-i18n="classSecond">二等座</option>
+          <option value="1" data-i18n="classFirst">一等座</option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span data-i18n="fPrice">票价</span>
+        <output id="f-price" class="price-out">—</output>
+      </label>
+
+      <button type="submit" class="btn-primary" data-i18n="submitSell">确认购票</button>
+    </form>
+  </section>
+
+  <!-- ==================== 旅客列表 ==================== -->
+  <section class="view" id="view-passengers">
+    <h2 class="view-title" data-i18n="passTitle">旅客列表</h2>
+    <p class="view-hint" id="pass-hint"></p>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th data-i18n="thId">证件</th>
+            <th data-i18n="thName">姓名</th>
+            <th data-i18n="thDate">日期</th>
+            <th data-i18n="thTrain">车次</th>
+            <th data-i18n="thRoute">行程</th>
+            <th data-i18n="thSeat">车厢/座位</th>
+            <th class="num" data-i18n="thPrice">票价</th>
+            <th class="num" data-i18n="thAction">操作</th>
+          </tr>
+        </thead>
+        <tbody id="pass-body"></tbody>
+      </table>
+      <p class="empty" id="pass-empty" hidden data-i18n="passEmpty">暂无旅客。</p>
+    </div>
+  </section>
+
+  <!-- ==================== 统计 ==================== -->
+  <section class="view" id="view-stats">
+    <h2 class="view-title" data-i18n="statsTitle">统计信息</h2>
+    <p class="view-hint" data-i18n="statsHint">按车次与日期查看座位占用与区段载客。</p>
+
+    <div class="stat-filters">
+      <label class="field field-inline">
+        <span data-i18n="fDate">出行日期</span>
+        <select id="s-date"></select>
+      </label>
+      <label class="field field-inline">
+        <span data-i18n="fTrain">车次</span>
+        <select id="s-train"></select>
+      </label>
+      <label class="field field-inline">
+        <span data-i18n="fClass">座位等级</span>
+        <select id="s-class">
+          <option value="0" data-i18n="classSecond">二等座</option>
+          <option value="1" data-i18n="classFirst">一等座</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="stat-cards">
+      <div class="stat-card">
+        <span class="stat-label" data-i18n="statTotal">售票总数</span>
+        <span class="stat-value" id="s-count">0</span>
+        <span class="stat-unit" data-i18n="unitTickets">张</span>
+      </div>
+      <div class="stat-card">
+        <span class="stat-label" data-i18n="statFare">票款合计</span>
+        <span class="stat-value" id="s-fare">0</span>
+        <span class="stat-unit" data-i18n="unitYuan">元</span>
+      </div>
+    </div>
+
+    <h3 class="sub-title" data-i18n="carriageTitle">各车厢座位</h3>
+    <div id="s-carriages" class="bars"></div>
+
+    <h3 class="sub-title" data-i18n="segmentTitle">各区段载客</h3>
+    <div id="s-segments" class="bars"></div>
+  </section>
+
+</main>
+
+<footer class="app-footer">
+  <div id="status" class="status"></div>
+  <div class="data-actions">
+    <button id="export-btn" class="btn-ghost" data-i18n="exportArchive">导出存档</button>
+    <button id="import-btn" class="btn-ghost" data-i18n="importArchive">导入存档</button>
+    <input type="file" id="import-file" accept=".dat,.bin,application/octet-stream" hidden>
+  </div>
+</footer>
+
+<!-- train_web.js 由 Emscripten 生成（经典 script，非 ES module，
+     这样 file:// 双击打开也能用），它定义全局 createTrainModule -->
+<script src="./train_web.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>

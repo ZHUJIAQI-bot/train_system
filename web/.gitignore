@@ -1,0 +1,4 @@
+# 构建产物。根目录的 .gitignore 只有 build*/，不覆盖 dist/，
+# 所以这里单独排掉，避免把生成的 wasm/JS 提交进仓库。
+dist/
+build/
