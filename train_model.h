@@ -78,10 +78,16 @@ extern int car_seats[CARRIAGE_COUNT + 1];    // 车厢1~5的座位数
 int calc_price(int board, int alight, int firstclass);
 
 // 校验身份证后4位：4位数字，或 3位数字 + 末尾 x/X
-int valid_id(char *id);
+int valid_id(const char *id);
 
 // 校验真实日期，格式为 YYYY-MM-DD
 int valid_date(const char *date);
+
+/* ---------------- 记录完整性校验 ---------------- */
+// 校验一条旅客记录的全部字段（含定长字段界内是否有 NUL 终止符）。
+// 通过返回 1；失败返回 0 并把原因写入 err。
+// 注意：price 不参与校验 —— 它是派生量，由 insert_passenger 统一重算。
+int validate_passenger(const Passenger *p, char *err, size_t errsz);
 
 /* ---------------- 车次 ---------------- */
 // 车次规则：G1~G10。奇数车次 北京(5)→上海(0)，偶数车次 上海(0)→北京(5)
@@ -122,16 +128,35 @@ int occupied_seat_total(const char *date);                       // 去重 车�
 int indexes_are_consistent(void);                                // 诊断：两棵索引与链表是否一致
 
 /* ---------------- 链表与索引 ---------------- */
-int   insert_passenger(Passenger p);          // 尾插，返回 0 表示内存分配失败
-int   delete_passenger(char *id);             // 按身份证删除，返回 0 表示未找到
-Node *search_passenger(char *id);             // 走B树索引查找，找不到返回 NULL
+// insert_passenger 是唯一的入库漏斗：会重算 price 并拒绝重复身份证。
+// 返回值用 INSERT_OK = 0 表示成功，调用方必须显式比较，避免 !ret 把错误码当成成功。
+typedef enum {
+    INSERT_OK = 0,
+    INSERT_DUPLICATE,
+    INSERT_NO_MEMORY
+} InsertResult;
+
+int   insert_passenger(Passenger p);
+int   delete_passenger(const char *id);       // 按身份证删除，返回 0 表示未找到
+Node *search_passenger(const char *id);       // 走B树索引查找，找不到返回 NULL
 void  free_all_passengers(void);              // 释放链表与两棵索引树
 
 // 删除出行日期早于 today 的旅客，返回删除条数
 int remove_expired_passengers(const char *today);
 
 /* ---------------- 存档 ---------------- */
+// load 的返回值同样用 0 表示成功，便于区分「没有文件」与「文件损坏被拒收」
+typedef enum {
+    LOAD_OK = 0,
+    LOAD_NO_FILE,        // 文件不存在（首次运行）
+    LOAD_REJECTED,       // 文件存在但未通过校验，已备份为 <名字>.bad-<时间戳>
+    LOAD_NO_MEMORY
+} LoadResult;
+
 int save_passengers(const char *filename);    // 返回 0 表示写失败
-int load_passengers(const char *filename);    // 返回 0 表示读失败
+int load_passengers(const char *filename);    // 返回 LoadResult
+
+// 存档与分析文件的默认路径（绝对路径，与工作目录无关）
+const char *default_data_file(void);
 
 #endif /* TRAIN_MODEL_H */

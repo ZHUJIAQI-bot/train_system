@@ -36,3 +36,7 @@ attic/
 *.user
 Thumbs.db
 desktop.ini
+
+# 测试与拒收备份产生的临时文件
+*.bad-*
+test_archive.dat*

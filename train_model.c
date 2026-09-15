@@ -27,7 +27,8 @@ int calc_price(int board, int alight, int firstclass) {
 }
 
 // 校验身份证后4位：4位数字，或 3位数字 + 末尾 x/X
-int valid_id(char *id) {
+// 前半段统一按大写比较的规范形式存放，避免 "123x" 与 "123X" 被当成两个不同的人
+int valid_id(const char *id) {
     if (strlen(id) != 4) return 0;                 // 必须是4位
     for (int i = 0; i < 3; i++)
         if (id[i] < '0' || id[i] > '9') return 0;  // 前3位必须是数字
@@ -60,6 +61,84 @@ int valid_date(const char *date) {
         days_in_month = leap ? 29 : 28;
     }
     return day >= 1 && day <= days_in_month;
+}
+
+/* ============================================================
+   记录完整性校验（存档读取与入库漏斗共用）
+   ============================================================ */
+
+// 定长字段界内是否存在 NUL 终止符。
+// 必须先查这个再调 strlen：损坏文件里 id[5]/train_no[4] 等数组可能整段无 NUL，
+// 直接 strlen 会一路读到相邻字段乃至结构体之外。
+static int field_terminated(const char *field, size_t size) {
+    return memchr(field, '\0', size) != NULL;
+}
+
+int validate_passenger(const Passenger *p, char *err, size_t errsz) {
+    // 1) 先确认所有定长字段界内有 NUL，后面才敢用 strlen
+    if (!field_terminated(p->id, sizeof(p->id))) {
+        snprintf(err, errsz, "身份证字段缺少终止符");
+        return 0;
+    }
+    if (!field_terminated(p->name, sizeof(p->name))) {
+        snprintf(err, errsz, "姓名字段缺少终止符");
+        return 0;
+    }
+    if (!field_terminated(p->travel_date, sizeof(p->travel_date))) {
+        snprintf(err, errsz, "日期字段缺少终止符");
+        return 0;
+    }
+    if (!field_terminated(p->train_no, sizeof(p->train_no))) {
+        snprintf(err, errsz, "车次字段缺少终止符");
+        return 0;
+    }
+    if (!field_terminated(p->depart_time, sizeof(p->depart_time))) {
+        snprintf(err, errsz, "发车时间字段缺少终止符");
+        return 0;
+    }
+
+    // 2) 逐字段形状
+    if (!valid_id(p->id)) {
+        snprintf(err, errsz, "身份证后4位格式不正确");
+        return 0;
+    }
+    if (p->name[0] == '\0') {
+        snprintf(err, errsz, "姓名为空");
+        return 0;
+    }
+
+    // 3) 车次、日期、车站、方向、等级 —— 与售票走同一套规则
+    char trip_err[128];
+    if (!validate_trip(p->train_no, p->travel_date, p->board, p->alight,
+                       p->firstclass, trip_err, sizeof(trip_err))) {
+        snprintf(err, errsz, "%s", trip_err);
+        return 0;
+    }
+
+    // 4) 车厢与座位
+    if (p->carriage < 1 || p->carriage > CARRIAGE_COUNT) {
+        snprintf(err, errsz, "车厢号应在 1~%d 之间", CARRIAGE_COUNT);
+        return 0;
+    }
+    if (p->seat < 1 || p->seat > car_seats[p->carriage]) {
+        snprintf(err, errsz, "座位号应在 1~%d 之间", car_seats[p->carriage]);
+        return 0;
+    }
+    if (car_type[p->carriage] != (p->firstclass ? 1 : 2)) {
+        snprintf(err, errsz, "%d号车厢是%s，与所购等级不符",
+                 p->carriage, car_type[p->carriage] == 1 ? "一等座" : "二等座");
+        return 0;
+    }
+
+    // 5) 发车时间必须与车次派生值一致
+    char expected_time[6];
+    train_depart_time(train_number_of(p->train_no), expected_time);
+    if (strcmp(p->depart_time, expected_time) != 0) {
+        snprintf(err, errsz, "发车时间 %s 与车次 %s 不符（应为 %s）",
+                 p->depart_time, p->train_no, expected_time);
+        return 0;
+    }
+    return 1;
 }
 
 /* ============================================================
@@ -329,10 +408,16 @@ static SearchTreeNode *insert_search_tree(SearchTreeNode *root, Node *data) {
         return tree_node;
     }
 
-    if (strcmp(data->data.id, root->data->data.id) < 0) {
-        root->left = insert_search_tree(root->left, data);
-    } else if (strcmp(data->data.id, root->data->data.id) > 0) {
-        root->right = insert_search_tree(root->right, data);
+    int order = strcmp(data->data.id, root->data->data.id);
+    if (order == 0) return root;          // 重复键：与 B 树保持一致的「忽略」语义
+    if (order < 0) {
+        // 必须接住递归结果再赋值：直接 root->left = ... 时，
+        // 一旦深层 malloc 失败返回 NULL，父结点会把整棵已有左子树置空并泄漏
+        SearchTreeNode *child = insert_search_tree(root->left, data);
+        if (child != NULL) root->left = child;
+    } else {
+        SearchTreeNode *child = insert_search_tree(root->right, data);
+        if (child != NULL) root->right = child;
     }
     return root;
 }
@@ -391,10 +476,13 @@ static Node *find_btree(BTreeNode *root, const char *id) {
     return root->leaf ? NULL : find_btree(root->children[index], id);
 }
 
-static void split_btree_child(BTreeNode *parent, int child_index) {
+// 分裂成功返回 1；分配失败返回 0，此时父结点保持原样，调用方必须放弃本次插入。
+// 若分配失败后仍继续插入，父结点仍指向满结点，叶子分支会写 keys[3] ——
+// 越过 keys[3][5] 覆盖到 values[] 指针数组，造成指针损坏。
+static int split_btree_child(BTreeNode *parent, int child_index) {
     BTreeNode *full = parent->children[child_index];
     BTreeNode *right = create_btree_node(full->leaf);
-    if (right == NULL) return;
+    if (right == NULL) return 0;
     right->key_count = BTREE_MIN_DEGREE - 1;
     for (int j = 0; j < BTREE_MIN_DEGREE - 1; j++) {
         strcpy(right->keys[j], full->keys[j + BTREE_MIN_DEGREE]);
@@ -418,6 +506,7 @@ static void split_btree_child(BTreeNode *parent, int child_index) {
     strcpy(parent->keys[child_index], full->keys[BTREE_MIN_DEGREE - 1]);
     parent->values[child_index] = full->values[BTREE_MIN_DEGREE - 1];
     parent->key_count++;
+    return 1;
 }
 
 static void insert_btree_nonfull(BTreeNode *node, Node *data) {
@@ -428,6 +517,8 @@ static void insert_btree_nonfull(BTreeNode *node, Node *data) {
             node->values[index + 1] = node->values[index];
             index--;
         }
+        // 重复键：与 BST 一样忽略，两棵索引在异常输入下也会「一致地少一个」
+        if (index >= 0 && strcmp(data->data.id, node->keys[index]) == 0) return;
         strcpy(node->keys[index + 1], data->data.id);
         node->values[index + 1] = data;
         node->key_count++;
@@ -436,7 +527,7 @@ static void insert_btree_nonfull(BTreeNode *node, Node *data) {
     while (index >= 0 && strcmp(data->data.id, node->keys[index]) < 0) index--;
     index++;
     if (node->children[index]->key_count == BTREE_MAX_KEYS) {
-        split_btree_child(node, index);
+        if (!split_btree_child(node, index)) return;   // 分裂失败则放弃，绝不带着满结点继续下沉
         if (strcmp(data->data.id, node->keys[index]) > 0) index++;
     }
     insert_btree_nonfull(node->children[index], data);
@@ -455,7 +546,10 @@ static void insert_btree(Node *data) {
         BTreeNode *new_root = create_btree_node(0);
         if (new_root == NULL) return;
         new_root->children[0] = btree_root;
-        split_btree_child(new_root, 0);
+        if (!split_btree_child(new_root, 0)) {
+            free(new_root);            // 分裂失败：保留原根，丢弃这个空壳
+            return;
+        }
         btree_root = new_root;
     }
     insert_btree_nonfull(btree_root, data);
@@ -488,29 +582,42 @@ int indexes_are_consistent(void) {
    链表操作
    ============================================================ */
 
-// 尾插：新旅客加到链表末尾（保持上车先后顺序）
+// 同时重建两棵索引（批量安装时用一次，避免逐条重建的 O(n²)）
+static void rebuild_indexes(void) {
+    rebuild_search_index();
+    rebuild_btree_index();
+}
+
+// 尾插：新旅客加到链表末尾（保持上车先后顺序）。
+// 这是唯一的入库漏斗 —— 统一重算票价、规范化身份证大小写、拒绝重复身份证。
+// 索引改为增量插入，不再每次整树重建（原来加载 n 条是 O(n²)）。
 int insert_passenger(Passenger p) {
-    Node *n = malloc(sizeof(Node));
-    if (n == NULL) {
-        printf("内存分配失败！\n");
-        return 0;
+    p.price = calc_price(p.board, p.alight, p.firstclass);  // 票价是派生量，不信任外部值
+
+    // 身份证末尾的 x 统一成大写，"123x" 与 "123X" 必须是同一个人
+    for (size_t i = 0; i + 1 < sizeof(p.id) && p.id[i] != '\0'; i++) {
+        if (p.id[i] == 'x') p.id[i] = 'X';
     }
+
+    // 重复身份证必须挡在入库前：两棵索引都以 id 为唯一键，
+    // 一旦重复，BST 会静默丢弃而 B 树照常插入，两棵索引将永久不一致。
+    if (find_btree(btree_root, p.id) != NULL) return INSERT_DUPLICATE;
+
+    Node *n = malloc(sizeof(Node));
+    if (n == NULL) return INSERT_NO_MEMORY;
     n->data = p;
     n->next = NULL;
 
-    if (head == NULL) {          // 空链表：直接当第一个
+    if (head == NULL) {
         head = n;
-        rebuild_search_index();
-        rebuild_btree_index();
-        return 1;
+    } else {
+        Node *t = head;
+        while (t->next != NULL) t = t->next;   // 交互式单张售票，n 很小
+        t->next = n;
     }
-    Node *t = head;
-    while (t->next != NULL)      // 走到最后一个结点
-        t = t->next;
-    t->next = n;                 // 把新结点挂上去
-    rebuild_search_index();
-    rebuild_btree_index();
-    return 1;
+    search_root = insert_search_tree(search_root, n);
+    insert_btree(n);
+    return INSERT_OK;
 }
 
 // 释放链表中的全部旅客
@@ -553,31 +660,29 @@ int remove_expired_passengers(const char *today) {
         current = next;
     }
 
-    if (removed > 0) {
-        rebuild_search_index();
-        rebuild_btree_index();
-    }
+    if (removed > 0) rebuild_indexes();
     return removed;
 }
 
 // 按身份证查找，返回结点指针，找不到返回 NULL
-Node *search_passenger(char *id) {
+Node *search_passenger(const char *id) {
     return find_btree(btree_root, id);
 }
 
-// 删除旅客（下车）：改 next 指针，并释放座位、回收内存
-int delete_passenger(char *id) {
+// 删除旅客（退票）：改 next 指针并回收内存。
+// 座位占用是从链表演生的，删除结点即自动释放，无需额外清理。
+// 删除后仍走整树重建（O(n)）—— 写 B 树删除算法的风险远大于这点开销。
+int delete_passenger(const char *id) {
     Node *t = head, *prev = NULL;
     while (t != NULL) {
         if (strcmp(t->data.id, id) == 0) {
-            if (prev == NULL)           // 删除的是头结点
+            if (prev == NULL)            // 删除的是头结点
                 head = t->next;
             else                         // 让前一个结点跳过它
                 prev->next = t->next;
 
-            free(t);                     // 回收内存（座位占用随结点一并释放）
-            rebuild_search_index();      // 删除后更新二叉搜索树索引
-            rebuild_btree_index();       // 删除后更新B树索引
+            free(t);
+            rebuild_indexes();
             return 1;                    // 成功
         }
         prev = t;
@@ -587,63 +692,277 @@ int delete_passenger(char *id) {
 }
 
 /* ============================================================
-   存档：二进制读写
+   存档 v4：字段级序列化 + 全量校验 + 原子加载 + v3 迁移
+
+   为什么不再直接 fwrite 整个结构体：v3 用 sizeof(Passenger) 落盘，
+   结构体内部的 padding 字节是未定义的，换个编译器布局就可能对不上。
+   v4 逐字段写固定长度，记录恒为 70 字节，与 sizeof(Passenger) 解耦。
    ============================================================ */
+#define SAVE_MAGIC         "TRNP"
+#define SAVE_VERSION       4
+#define SAVE_HEADER_SIZE   16   /* magic(4) + version(4) + count(4) + record_size(4) */
+#define SAVE_RECORD_SIZE   70   /* 5+20+11+4+6 = 46 字节字符 + 6 × int32 */
+#define LEGACY_V3_RECORD_SIZE 72 /* v3 直接写 sizeof(Passenger)，含 padding */
 
-// 保存当前旅客和座位信息到二进制文件
-int save_passengers(const char *filename) {
-    FILE *file = fopen(filename, "wb");
-    if (file == NULL) return 0;
+/* v3 迁移路径依赖旧记录布局与当前 Passenger 完全一致 */
+_Static_assert(sizeof(Passenger) == LEGACY_V3_RECORD_SIZE,
+               "Passenger 布局已改变，v3 迁移路径需要同步更新");
 
-    int version = 3;
-    int count = 0;
-    for (Node *current = head; current != NULL; current = current->next) {
-        count++;
-    }
-    if (fwrite(&version, sizeof(version), 1, file) != 1 ||
-        fwrite(&count, sizeof(count), 1, file) != 1) {
-        fclose(file);
-        return 0;
-    }
-    for (Node *current = head; current != NULL; current = current->next) {
-        if (fwrite(&current->data, sizeof(Passenger), 1, file) != 1) {
-            fclose(file);
-            return 0;
-        }
-    }
-    fclose(file);
+static int write_i32(FILE *file, int value) {
+    unsigned char bytes[4];
+    bytes[0] = (unsigned char)(value & 0xFF);
+    bytes[1] = (unsigned char)((value >> 8) & 0xFF);
+    bytes[2] = (unsigned char)((value >> 16) & 0xFF);
+    bytes[3] = (unsigned char)((value >> 24) & 0xFF);
+    return fwrite(bytes, 1, 4, file) == 4;
+}
+
+static int read_i32(FILE *file, int *out) {
+    unsigned char bytes[4];
+    if (fread(bytes, 1, 4, file) != 4) return 0;
+    *out = (int)((unsigned)bytes[0] | ((unsigned)bytes[1] << 8) |
+                 ((unsigned)bytes[2] << 16) | ((unsigned)bytes[3] << 24));
     return 1;
 }
 
-// 从二进制文件恢复旅客和座位信息
-int load_passengers(const char *filename) {
-    FILE *file = fopen(filename, "rb");
-    if (file == NULL) return 0;
+// 定长字符字段写盘：NUL 之后的字节一律补 0。
+// 不要把结构体 padding 里的垃圾写进文件，否则同样的数据换个编译器就reproduce不出来。
+static int write_fixed(FILE *file, const char *text, size_t size) {
+    unsigned char buffer[32];
+    if (size > sizeof(buffer)) return 0;
+    memset(buffer, 0, size);
+    memcpy(buffer, text, bounded_len(text, size));
+    return fwrite(buffer, 1, size, file) == size;
+}
 
-    int version = 0;
-    int count = 0;
-    if (fread(&version, sizeof(version), 1, file) != 1 || version != 3 ||
-        fread(&count, sizeof(count), 1, file) != 1 || count < 0 || count > MAX_PASSENGERS) {
-        fclose(file);
-        return 0;
+static int read_fixed(FILE *file, char *out, size_t size) {
+    return fread(out, 1, size, file) == size;
+}
+
+static int write_record(FILE *file, const Passenger *p) {
+    if (!write_fixed(file, p->id, sizeof(p->id))) return 0;
+    if (!write_fixed(file, p->name, sizeof(p->name))) return 0;
+    if (!write_fixed(file, p->travel_date, sizeof(p->travel_date))) return 0;
+    if (!write_fixed(file, p->train_no, sizeof(p->train_no))) return 0;
+    if (!write_fixed(file, p->depart_time, sizeof(p->depart_time))) return 0;
+    if (!write_i32(file, p->board)) return 0;
+    if (!write_i32(file, p->alight)) return 0;
+    if (!write_i32(file, p->price)) return 0;
+    if (!write_i32(file, p->carriage)) return 0;
+    if (!write_i32(file, p->seat)) return 0;
+    if (!write_i32(file, p->firstclass)) return 0;
+    return 1;
+}
+
+static int read_record(FILE *file, Passenger *p) {
+    memset(p, 0, sizeof(*p));
+    if (!read_fixed(file, p->id, sizeof(p->id))) return 0;
+    if (!read_fixed(file, p->name, sizeof(p->name))) return 0;
+    if (!read_fixed(file, p->travel_date, sizeof(p->travel_date))) return 0;
+    if (!read_fixed(file, p->train_no, sizeof(p->train_no))) return 0;
+    if (!read_fixed(file, p->depart_time, sizeof(p->depart_time))) return 0;
+    if (!read_i32(file, &p->board)) return 0;
+    if (!read_i32(file, &p->alight)) return 0;
+    if (!read_i32(file, &p->price)) return 0;
+    if (!read_i32(file, &p->carriage)) return 0;
+    if (!read_i32(file, &p->seat)) return 0;
+    if (!read_i32(file, &p->firstclass)) return 0;
+    return 1;
+}
+
+static long file_size_of(FILE *file) {
+    long current = ftell(file);
+    if (current < 0) return -1;
+    if (fseek(file, 0, SEEK_END) != 0) return -1;
+    long size = ftell(file);
+    fseek(file, current, SEEK_SET);
+    return size;
+}
+
+// 拒收时把坏文件改名留档，绝不就地覆盖
+static void backup_rejected_file(const char *filename) {
+    char backup[700];
+    time_t now = time(NULL);
+    struct tm stamp = *localtime(&now);
+    snprintf(backup, sizeof(backup), "%s.bad-%04d%02d%02d-%02d%02d%02d",
+             filename, stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
+             stamp.tm_hour, stamp.tm_min, stamp.tm_sec);
+    remove(backup);
+    rename(filename, backup);
+}
+
+static void free_node_chain(Node *first) {
+    while (first != NULL) {
+        Node *next = first->next;
+        free(first);
+        first = next;
     }
+}
 
-    free_all_passengers();
+// 对读入的记录做全量校验，并在通过后统一重算票价、规范化身份证大小写
+static int validate_records(Passenger *records, int count, char *err, size_t errsz) {
     for (int i = 0; i < count; i++) {
-        Passenger passenger;
-        if (fread(&passenger, sizeof(Passenger), 1, file) != 1 ||
-            passenger.carriage < 1 || passenger.carriage > CARRIAGE_COUNT ||
-            passenger.seat < 1 || passenger.seat > car_seats[passenger.carriage]) {
-            free_all_passengers();
-            fclose(file);
+        char reason[160];
+        if (!validate_passenger(&records[i], reason, sizeof(reason))) {
+            snprintf(err, errsz, "第 %d 条记录无效：%s", i + 1, reason);
             return 0;
         }
-        if (!insert_passenger(passenger)) {
-            free_all_passengers();
-            fclose(file);
-            return 0;
+        records[i].price = calc_price(records[i].board, records[i].alight,
+                                      records[i].firstclass);
+        for (size_t k = 0; k + 1 < sizeof(records[i].id) && records[i].id[k] != '\0'; k++) {
+            if (records[i].id[k] == 'x') records[i].id[k] = 'X';
+        }
+    }
+
+    // 跨记录约束：身份证必须唯一，同车次同日期同座位的区段不得重叠。
+    // O(n²)，但内层先用整数比较短路，且只在加载时做一次，n 上限 10000，可以接受。
+    for (int i = 0; i < count; i++) {
+        for (int j = 0; j < i; j++) {
+            if (strcmp(records[i].id, records[j].id) == 0) {
+                snprintf(err, errsz, "第 %d 条与第 %d 条身份证重复", j + 1, i + 1);
+                return 0;
+            }
+            if (records[i].carriage != records[j].carriage) continue;
+            if (records[i].seat != records[j].seat) continue;
+            if (strcmp(records[i].train_no, records[j].train_no) != 0) continue;
+            if (strcmp(records[i].travel_date, records[j].travel_date) != 0) continue;
+            if (seat_segments_overlap(records[i].board, records[i].alight,
+                                      records[j].board, records[j].alight)) {
+                snprintf(err, errsz,
+                         "第 %d 条与第 %d 条在同一车次同一座位且乘车区段重叠",
+                         j + 1, i + 1);
+                return 0;
+            }
+        }
+    }
+    return 1;
+}
+
+const char *default_data_file(void) {
+    return "D:/train_system/passengers.dat";
+}
+
+// 保存到 filename：先写 filename.tmp，成功后才替换原文件。
+// 这样即使写到一半崩溃，原文件仍然完好，不会留下截断的存档。
+int save_passengers(const char *filename) {
+    char tmp_path[600];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filename);
+
+    FILE *file = fopen(tmp_path, "wb");
+    if (file == NULL) return 0;
+
+    int ok = 1;
+    int count = passenger_count();
+
+    if (fwrite(SAVE_MAGIC, 1, 4, file) != 4) ok = 0;
+    if (ok && !write_i32(file, SAVE_VERSION)) ok = 0;
+    if (ok && !write_i32(file, count)) ok = 0;
+    if (ok && !write_i32(file, SAVE_RECORD_SIZE)) ok = 0;
+    for (Node *current = head; ok && current != NULL; current = current->next) {
+        if (!write_record(file, &current->data)) ok = 0;
+    }
+    if (fclose(file) != 0) ok = 0;
+
+    if (!ok) {
+        remove(tmp_path);
+        return 0;
+    }
+    // Windows 的 rename 不覆盖已存在文件，故先删目标再改名。
+    // 该窗口极短（远小于整个写入过程），且坏文件已由备份路径兜底。
+    remove(filename);
+    if (rename(tmp_path, filename) != 0) {
+        remove(tmp_path);
+        return 0;
+    }
+    return 1;
+}
+
+// 读取 filename。全过程先读到临时数组并校验通过，最后才切换全局状态，
+// 因此「文件损坏」绝不会破坏内存中已有的数据。
+int load_passengers(const char *filename) {
+    FILE *file = fopen(filename, "rb");
+    if (file == NULL) return LOAD_NO_FILE;
+
+    long size = file_size_of(file);
+    unsigned char header[4];
+    Passenger *records = NULL;
+    int count = 0;
+    int parsed = 0;
+    int legacy = 0;
+
+    if (size >= 4 && fread(header, 1, 4, file) == 4) {
+        if (memcmp(header, SAVE_MAGIC, 4) == 0) {
+            /* ---- v4 ---- */
+            int version = 0, record_size = 0;
+            if (read_i32(file, &version) && read_i32(file, &count) &&
+                read_i32(file, &record_size) &&
+                version == SAVE_VERSION && record_size == SAVE_RECORD_SIZE &&
+                count >= 0 && count <= MAX_PASSENGERS &&
+                size == SAVE_HEADER_SIZE + (long)count * SAVE_RECORD_SIZE) {
+                records = malloc((size_t)(count > 0 ? count : 1) * sizeof(Passenger));
+                if (records != NULL) {
+                    parsed = 1;
+                    for (int i = 0; i < count && parsed; i++) {
+                        if (!read_record(file, &records[i])) parsed = 0;
+                    }
+                    if (parsed && fgetc(file) != EOF) parsed = 0;  /* 尾部不得有多余字节 */
+                }
+            }
+        } else {
+            /* ---- v3 迁移：老格式没有 magic，前 4 字节就是 version ---- */
+            int version = (int)((unsigned)header[0] | ((unsigned)header[1] << 8) |
+                                ((unsigned)header[2] << 16) | ((unsigned)header[3] << 24));
+            if (version == 3 && read_i32(file, &count) &&
+                count >= 0 && count <= MAX_PASSENGERS &&
+                size == 8 + (long)count * LEGACY_V3_RECORD_SIZE) {
+                records = malloc((size_t)(count > 0 ? count : 1) * sizeof(Passenger));
+                if (records != NULL) {
+                    parsed = 1;
+                    legacy = 1;
+                    for (int i = 0; i < count && parsed; i++) {
+                        if (fread(&records[i], LEGACY_V3_RECORD_SIZE, 1, file) != 1) parsed = 0;
+                    }
+                }
+            }
         }
     }
     fclose(file);
-    return 1;
+
+    if (!parsed) {
+        free(records);
+        backup_rejected_file(filename);
+        return LOAD_REJECTED;
+    }
+
+    char reason[192];
+    if (!validate_records(records, count, reason, sizeof(reason))) {
+        free(records);
+        backup_rejected_file(filename);
+        return LOAD_REJECTED;
+    }
+
+    // 先把临时链表建完，全部成功再动全局状态
+    Node *tmp_head = NULL, *tmp_tail = NULL;
+    for (int i = 0; i < count; i++) {
+        Node *n = malloc(sizeof(Node));
+        if (n == NULL) {
+            free_node_chain(tmp_head);
+            free(records);
+            return LOAD_NO_MEMORY;
+        }
+        n->data = records[i];
+        n->next = NULL;
+        if (tmp_tail != NULL) tmp_tail->next = n;
+        else tmp_head = n;
+        tmp_tail = n;
+    }
+    free(records);
+
+    free_all_passengers();
+    head = tmp_head;
+    rebuild_indexes();
+
+    // 从 v3 迁移过来的数据立即以 v4 重写回盘
+    if (legacy) save_passengers(filename);
+    return LOAD_OK;
 }

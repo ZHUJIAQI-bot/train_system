@@ -7,6 +7,13 @@
 #include <windows.h>
 #endif
 
+// 每次改动后落盘；失败只提示，不中断流程
+static void save_data(void) {
+    if (!save_passengers(default_data_file())) {
+        printf("警告：数据保存失败，本次改动仅存在于内存中。\n");
+    }
+}
+
 // 读取整数，并处理用户输入非数字的情况
 int read_int(const char *prompt, int *value) {
     int result;
@@ -111,10 +118,13 @@ void sell_ticket() {
     p.carriage   = c;
     p.seat       = s;
 
-    if (!insert_passenger(p)) {
-        printf("购票失败，无法保存旅客信息。\n");
+    InsertResult result = insert_passenger(p);
+    if (result != INSERT_OK) {
+        printf("%s\n", result == INSERT_DUPLICATE ? "该身份证已经购票。"
+                                                  : "购票失败，内存不足。");
         return;
     }
+    save_data();
 
     printf("购票成功！%s %s %s %s发车 车厢%d %d号座位，票价%d元。\n",
            p.name, p.travel_date, p.train_no, p.depart_time, c, s, p.price);
@@ -123,12 +133,14 @@ void sell_ticket() {
 // 旅客下车
 void passenger_alight() {
     char id[20];
-    printf("要下车的旅客身份证后4位：");
+    printf("要退票的旅客身份证后4位：");
     scanf("%19s", id);
-    if (delete_passenger(id))
-        printf("旅客 %s 已下车。\n", id);
-    else
-        printf("未找到该旅客，下车失败。\n");
+    if (delete_passenger(id)) {
+        save_data();
+        printf("旅客 %s 已退票。\n", id);
+    } else {
+        printf("未找到该旅客，退票失败。\n");
+    }
 }
 
 // 按身份证查询
@@ -185,7 +197,7 @@ void statistics() {
 void menu() {
     printf("\n======== 高铁列车旅客管理系统 ========\n");
     printf("  1. 售票（旅客购票上车）\n");
-    printf("  2. 旅客下车\n");
+    printf("  2. 旅客退票\n");
     printf("  3. 按身份证查询旅客\n");
     printf("  4. 显示全部旅客\n");
     printf("  5. 按车厢统计（需车次+日期）\n");
@@ -203,6 +215,26 @@ int main() {
 #else
     system("chcp 65001 >nul");
 #endif
+
+    const char *data_file = default_data_file();
+    LoadResult loaded = load_passengers(data_file);
+    if (loaded == LOAD_OK) {
+        printf("已读取存档：%d 名旅客。\n", passenger_count());
+    } else if (loaded == LOAD_REJECTED) {
+        printf("警告：存档未通过校验，已备份为 %s.bad-<时间戳>，本次以空列表启动。\n",
+               data_file);
+    } else if (loaded == LOAD_NO_MEMORY) {
+        printf("警告：内存不足，无法读取存档。\n");
+    }
+
+    char today[11];
+    today_string(today);
+    int expired = remove_expired_passengers(today);
+    if (expired > 0) {
+        printf("已自动清理 %d 名过期旅客。\n", expired);
+        save_data();
+    }
+
     int choice;
     do {
         menu();
@@ -221,12 +253,13 @@ int main() {
             case 4: print_all();        break;
             case 5: stat_by_carriage(); break;
             case 6: statistics();       break;
-            case 0:
-                free_all_passengers();
-                printf("再见！\n");
-                break;
+            case 0:                     break;
             default: printf("无效选项，请重试。\n");
         }
     } while (choice != 0);
+
+    save_data();                        // 正常退出与输入结束两条路径都落盘
+    free_all_passengers();
+    printf("再见！\n");
     return 0;
 }

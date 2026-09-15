@@ -238,6 +238,214 @@ static void test_stats(void) {
     check(total_fare() == expected - calc_price(1, 4, 0), "退票后票款应减少");
 }
 
+/* ---------------- 存档损坏用例 ----------------
+   v4 记录布局（相对记录起点）：
+     id 0 | name 5 | travel_date 25 | train_no 36 | depart_time 40
+     board 46 | alight 50 | price 54 | carriage 58 | seat 62 | firstclass 66
+   文件布局：16 字节头 + count × 70 字节记录                      */
+#define ARCHIVE_PATH "test_archive.dat"
+#define RECORD_BASE(i) (16L + (long)(i) * 70L)
+
+static void put_i32_le(FILE *file, int value) {
+    unsigned char bytes[4];
+    bytes[0] = (unsigned char)(value & 0xFF);
+    bytes[1] = (unsigned char)((value >> 8) & 0xFF);
+    bytes[2] = (unsigned char)((value >> 16) & 0xFF);
+    bytes[3] = (unsigned char)((value >> 24) & 0xFF);
+    fwrite(bytes, 1, 4, file);
+}
+
+static void put_fixed(FILE *file, const char *text, size_t size) {
+    char buffer[32];
+    memset(buffer, 0, size);
+    memcpy(buffer, text, strlen(text) < size ? strlen(text) : size);
+    fwrite(buffer, 1, size, file);
+}
+
+// 按 v4 格式写一份存档
+static void write_archive(const char *path, const Passenger *records, int count) {
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) return;
+    fwrite("TRNP", 1, 4, file);
+    put_i32_le(file, 4);
+    put_i32_le(file, count);
+    put_i32_le(file, 70);
+    for (int i = 0; i < count; i++) {
+        put_fixed(file, records[i].id, 5);
+        put_fixed(file, records[i].name, 20);
+        put_fixed(file, records[i].travel_date, 11);
+        put_fixed(file, records[i].train_no, 4);
+        put_fixed(file, records[i].depart_time, 6);
+        put_i32_le(file, records[i].board);
+        put_i32_le(file, records[i].alight);
+        put_i32_le(file, records[i].price);
+        put_i32_le(file, records[i].carriage);
+        put_i32_le(file, records[i].seat);
+        put_i32_le(file, records[i].firstclass);
+    }
+    fclose(file);
+}
+
+// 就地改写文件里的若干字节，用来模拟损坏
+static void poke_bytes(const char *path, long offset,
+                       const unsigned char *bytes, size_t n) {
+    FILE *file = fopen(path, "r+b");
+    if (file == NULL) return;
+    if (fseek(file, offset, SEEK_SET) == 0) fwrite(bytes, 1, n, file);
+    fclose(file);
+}
+
+static void test_archive(void) {
+    printf("存档读写与损坏拒收\n");
+    Passenger good = make("1111", "2026-09-16", "G2", 0, 2, 0, 3, 1);
+    Passenger second = make("2222", "2026-09-16", "G2", 3, 5, 0, 3, 1);
+
+    // --- 正常往返 ---
+    write_archive(ARCHIVE_PATH, &good, 1);
+    reset();
+    check(load_passengers(ARCHIVE_PATH) == LOAD_OK, "合法 v4 文件应能读入");
+    check(passenger_count() == 1, "应读入 1 条记录");
+    check(indexes_are_consistent(), "读入后两棵索引应一致");
+
+    // --- 文件不存在 ---
+    check(load_passengers("no_such_file_here.dat") == LOAD_NO_FILE,
+          "文件不存在应返回 LOAD_NO_FILE");
+
+    // --- 单人字段级损坏 ---
+    struct { const char *what; int field_off; int value; } int_cases[] = {
+        {"board=99（旧代码会 board_cnt[99]++ 越界）", 46, 99},
+        {"alight=6 越界",              50, 6},
+        {"board==alight",              46, 2},
+        {"carriage=0",                 58, 0},
+        {"carriage=6",                 58, 6},
+        {"seat=0",                     62, 0},
+        {"seat=car_seats+1",           62, 13},
+        {"firstclass=2",               66, 2},
+        {"level 与车厢不符（二等票进一等车厢）", 58, 1},
+    };
+    for (size_t i = 0; i < sizeof(int_cases) / sizeof(int_cases[0]); i++) {
+        write_archive(ARCHIVE_PATH, &good, 1);
+        FILE *file = fopen(ARCHIVE_PATH, "r+b");
+        fseek(file, RECORD_BASE(0) + int_cases[i].field_off, SEEK_SET);
+        put_i32_le(file, int_cases[i].value);
+        fclose(file);
+        check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, int_cases[i].what);
+    }
+
+    // board==alight 的用例需要 alight 与 board 相同
+    write_archive(ARCHIVE_PATH, &good, 1);
+    {
+        FILE *file = fopen(ARCHIVE_PATH, "r+b");
+        fseek(file, RECORD_BASE(0) + 50, SEEK_SET);
+        put_i32_le(file, 0);
+        fclose(file);
+    }
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "board==alight 应被拒收");
+
+    // --- 车次与方向 ---
+    {
+        Passenger bad = good;
+        snprintf(bad.train_no, sizeof(bad.train_no), "G11");
+        write_archive(ARCHIVE_PATH, &bad, 1);
+        check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "车次 G11 应被拒收");
+
+        bad = good;
+        snprintf(bad.train_no, sizeof(bad.train_no), "G1");   // G1 是北京→上海，与 0→2 方向不符
+        write_archive(ARCHIVE_PATH, &bad, 1);
+        check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "车次方向与行程不符应被拒收");
+
+        bad = good;
+        snprintf(bad.depart_time, sizeof(bad.depart_time), "09:99");  // 与 G2 的 06:30 不符
+        write_archive(ARCHIVE_PATH, &bad, 1);
+        check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "发车时间与车次不符应被拒收");
+    }
+
+    // --- 定长字段界内没有 NUL 终止符（旧代码会在这里 strlen 越界读） ---
+    write_archive(ARCHIVE_PATH, &good, 1);
+    {
+        unsigned char no_nul[5] = {'1', '2', '3', '4', '5'};
+        poke_bytes(ARCHIVE_PATH, RECORD_BASE(0), no_nul, 5);
+    }
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED,
+          "id 字段无终止符应被拒收且不崩溃");
+
+    write_archive(ARCHIVE_PATH, &good, 1);
+    {
+        unsigned char no_nul[20];
+        memset(no_nul, 'A', sizeof(no_nul));
+        poke_bytes(ARCHIVE_PATH, RECORD_BASE(0) + 5, no_nul, 20);
+    }
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED,
+          "name 字段无终止符应被拒收且不崩溃");
+
+    // --- 文件头损坏 ---
+    write_archive(ARCHIVE_PATH, &good, 1);
+    {
+        unsigned char bogus_version[4] = {99, 0, 0, 0};
+        poke_bytes(ARCHIVE_PATH, 4, bogus_version, 4);
+    }
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "version=99 应被拒收");
+
+    write_archive(ARCHIVE_PATH, &good, 1);
+    {
+        unsigned char bogus_magic[4] = {'X', 'X', 'X', 'X'};
+        poke_bytes(ARCHIVE_PATH, 0, bogus_magic, 4);
+    }
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "magic 错误应被拒收");
+
+    write_archive(ARCHIVE_PATH, &good, 1);
+    {
+        FILE *file = fopen(ARCHIVE_PATH, "r+b");
+        fseek(file, 8, SEEK_SET);      // count 写成 5，但文件里只有 1 条
+        put_i32_le(file, 5);
+        fclose(file);
+    }
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED,
+          "count 与实际长度不符（截断文件）应被拒收");
+
+    // --- 价格不受信任，读入后按规则重算 ---
+    write_archive(ARCHIVE_PATH, &good, 1);
+    {
+        FILE *file = fopen(ARCHIVE_PATH, "r+b");
+        fseek(file, RECORD_BASE(0) + 54, SEEK_SET);
+        put_i32_le(file, 99999);
+        fclose(file);
+    }
+    reset();
+    check(load_passengers(ARCHIVE_PATH) == LOAD_OK, "price 被篡改仍应接受该记录");
+    check(head != NULL && head->data.price == calc_price(0, 2, 0),
+          "读入后 price 应被重算覆盖，而不是照抄文件里的 99999");
+
+    // --- 跨记录约束 ---
+    Passenger pair[2];
+    pair[0] = good;
+    pair[1] = second;                       // 同一座位、区段不相交
+    write_archive(ARCHIVE_PATH, pair, 2);
+    reset();
+    check(load_passengers(ARCHIVE_PATH) == LOAD_OK, "同座位但区段不相交应被接受");
+    check(passenger_count() == 2, "应读入 2 条");
+
+    pair[1] = make("2222", "2026-09-16", "G2", 1, 4, 0, 3, 1);  // 同座位且区段相交
+    write_archive(ARCHIVE_PATH, pair, 2);
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "同座位且区段重叠应被拒收");
+
+    pair[1] = make("1111", "2026-09-16", "G2", 3, 5, 0, 3, 2);  // 身份证重复
+    write_archive(ARCHIVE_PATH, pair, 2);
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "身份证重复应被拒收");
+
+    // --- 原子性：拒收绝不能破坏内存中已有的数据 ---
+    reset();
+    insert_passenger(make("9999", "2026-09-16", "G2", 0, 2, 0, 3, 1));
+    write_archive(ARCHIVE_PATH, pair, 2);   // 这份是坏的（身份证重复）
+    check(load_passengers(ARCHIVE_PATH) == LOAD_REJECTED, "坏文件应被拒收");
+    check(passenger_count() == 1, "拒收后内存中的原有数据不应被清空");
+    check(search_passenger("9999") != NULL, "拒收后原有记录仍应能查到");
+    check(indexes_are_consistent(), "拒收后索引仍应一致");
+
+    remove(ARCHIVE_PATH);
+    reset();
+}
+
 int main(void) {
     test_overlap();
     test_train();
@@ -246,6 +454,7 @@ int main(void) {
     test_class_and_capacity();
     test_indexes();
     test_stats();
+    test_archive();
     reset();
 
     printf("\n================================\n");

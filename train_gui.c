@@ -10,7 +10,8 @@
 #define FIELD_COUNT 7
 #define CONTENT_WIDTH 650
 #define CONTENT_X (PANEL_X + ((WINDOW_WIDTH - PANEL_X - CONTENT_WIDTH) / 2))
-#define DATA_FILE "D:/train_system/passengers.dat"
+/* 存档路径由模型层统一提供，控制台版与 GUI 版共用同一份数据 */
+#define DATA_FILE default_data_file()
 
 static const Color CNR_RED = {54, 126, 190, 255};
 static const Color CNR_DARK_RED = {35, 92, 151, 255};
@@ -484,8 +485,12 @@ static bool gui_sell_ticket(TextField *fields, char *status, size_t status_size)
     passenger.carriage = carriage;
     passenger.seat = seat;
 
-    if (!insert_passenger(passenger)) {
-        snprintf(status, status_size, "%s", tr("无法分配旅客信息内存。", "Could not allocate passenger memory."));
+    InsertResult inserted = insert_passenger(passenger);
+    if (inserted != INSERT_OK) {
+        snprintf(status, status_size, "%s",
+                 inserted == INSERT_DUPLICATE
+                     ? tr("该身份证已经购票。", "This ID already has a ticket.")
+                     : tr("无法分配旅客信息内存。", "Could not allocate passenger memory."));
         return false;
     }
     if (!save_passengers(DATA_FILE)) {
@@ -725,13 +730,23 @@ int main(void) {
     fields[1].max_bytes = 19;
     set_date_field(&fields[5], 0);
     char status[128] = "请从左侧菜单选择功能。";
-    if (load_passengers(DATA_FILE)) {
+    // 加载被拒收时坏文件已备份为 .bad-<时间戳>，此时不应在退出时把空表写回去
+    bool data_rejected = false;
+    LoadResult loaded = load_passengers(DATA_FILE);
+    if (loaded == LOAD_OK) {
         snprintf(status, sizeof(status), "%s", tr("已读取上次保存的数据。", "Saved data loaded."));
+    } else if (loaded == LOAD_REJECTED) {
+        data_rejected = true;
+        snprintf(status, sizeof(status), "%s",
+                 tr("存档未通过校验，已备份为 .bad-<时间戳>，以空列表启动。",
+                    "Save file failed validation; backed up as .bad-<timestamp>."));
+    } else if (loaded == LOAD_NO_MEMORY) {
+        data_rejected = true;
+        snprintf(status, sizeof(status), "%s",
+                 tr("内存不足，无法读取存档。", "Not enough memory to load the save file."));
     }
     char today[11];
-    time_t now = time(NULL);
-    struct tm current_date = *localtime(&now);
-    strftime(today, sizeof(today), "%Y-%m-%d", &current_date);
+    today_string(today);
     int expired_count = remove_expired_passengers(today);
     if (expired_count > 0) {
         save_passengers(DATA_FILE);
@@ -933,7 +948,8 @@ int main(void) {
         EndDrawing();
     }
 
-    save_passengers(DATA_FILE);
+    // 只有成功加载过（或首次运行）才写回，避免用空表覆盖掉刚被拒收的存档
+    if (!data_rejected) save_passengers(DATA_FILE);
     free_all_passengers();
     if (english_font_loaded) UnloadFont(english_font);
     if (chinese_font_loaded) UnloadFont(chinese_font);
