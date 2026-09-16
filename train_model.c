@@ -13,6 +13,20 @@ const char *stations[STATION_COUNT] = {"上海", "苏州", "南京", "济南", "
 int car_type[CARRIAGE_COUNT + 1]  = {0, 1, 1, 2, 2, 2};      // 1=一等座 2=二等座
 int car_seats[CARRIAGE_COUNT + 1] = {0, 8, 8, 12, 12, 12};   // 各车厢座位数
 
+/* 修订号：每当链表内容发生变化就递增。
+   统计类函数是 O(n)~O(n²)，而 GUI 每帧（60fps）都要画仪表盘和统计页，
+   数据不变时反复重算是纯浪费。调用方缓存上一次的修订号，
+   只有变化了才重新计算。 */
+static unsigned model_revision_counter = 0;
+
+unsigned model_revision(void) {
+    return model_revision_counter;
+}
+
+static void model_touch(void) {
+    model_revision_counter++;
+}
+
 /* ============================================================
    基础计算与校验
    ============================================================ */
@@ -639,6 +653,7 @@ int insert_passenger(Passenger p) {
     }
     search_root = insert_search_tree(search_root, n);
     insert_btree(n);
+    model_touch();
     return INSERT_OK;
 }
 
@@ -656,6 +671,7 @@ void free_all_passengers(void) {
         current = next;
     }
     head = NULL;
+    model_touch();
 }
 
 // 删除出行日期早于 today 的旅客，并释放对应座位和链表结点
@@ -682,7 +698,10 @@ int remove_expired_passengers(const char *today) {
         current = next;
     }
 
-    if (removed > 0) rebuild_indexes();
+    if (removed > 0) {
+        rebuild_indexes();
+        model_touch();
+    }
     return removed;
 }
 
@@ -705,6 +724,7 @@ int delete_passenger(const char *id) {
 
             free(t);
             rebuild_indexes();
+            model_touch();
             return 1;                    // 成功
         }
         prev = t;
@@ -801,14 +821,20 @@ static long file_size_of(FILE *file) {
     return size;
 }
 
+// 在 base 后面接上 "<tag>-<时间戳>"，用于生成不覆盖既有文件的备份名
+static void make_timestamped_name(const char *base, const char *tag,
+                                  char *out, size_t outsz) {
+    time_t now = time(NULL);
+    struct tm stamp = *localtime(&now);
+    snprintf(out, outsz, "%s%s-%04d%02d%02d-%02d%02d%02d", base, tag,
+             stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
+             stamp.tm_hour, stamp.tm_min, stamp.tm_sec);
+}
+
 // 拒收时把坏文件改名留档，绝不就地覆盖
 static void backup_rejected_file(const char *filename) {
     char backup[700];
-    time_t now = time(NULL);
-    struct tm stamp = *localtime(&now);
-    snprintf(backup, sizeof(backup), "%s.bad-%04d%02d%02d-%02d%02d%02d",
-             filename, stamp.tm_year + 1900, stamp.tm_mon + 1, stamp.tm_mday,
-             stamp.tm_hour, stamp.tm_min, stamp.tm_sec);
+    make_timestamped_name(filename, ".bad", backup, sizeof(backup));
     remove(backup);
     rename(filename, backup);
 }
@@ -860,8 +886,113 @@ static int validate_records(Passenger *records, int count, char *err, size_t err
     return 1;
 }
 
+// 取一个路径的目录部分。同时认 '/' 与 '\\'，返回 0 表示没有目录部分。
+static int dir_of(const char *file, char *out, size_t outsz) {
+    const char *slash = strrchr(file, '/');
+    const char *backslash = strrchr(file, '\\');
+    if (backslash != NULL && (slash == NULL || backslash > slash)) slash = backslash;
+    if (slash == NULL) return 0;
+    size_t n = (size_t)(slash - file);
+    if (n == 0 || n + 1 > outsz) return 0;
+    memcpy(out, file, n);
+    out[n] = '\0';
+    return 1;
+}
+
+/* 存档路径不再写死成绝对路径：原来硬编码 "D:/train_system/passengers.dat"，
+   项目一挪目录或换台电脑就静默读不到数据、开出一张空表。
+   现在按优先级依次尝试，结果缓存在静态缓冲里：
+     1. 环境变量 TRAIN_DATA_FILE —— 便于手动指定或做多套数据
+     2. 编译 train_model.c 时记录的目录 —— 整个项目挪走也能跟上
+     3. 当前工作目录 —— 最后兜底
+   刻意不用平台 API（如 Windows 的 GetModuleFileName）：那会让本文件依赖
+   windows.h，而它同时要编译进 WebAssembly。 */
 const char *default_data_file(void) {
-    return "D:/train_system/passengers.dat";
+    static char path[1024];
+    static int resolved = 0;
+    if (resolved) return path;
+    resolved = 1;
+
+    const char *from_env = getenv("TRAIN_DATA_FILE");
+    if (from_env != NULL && from_env[0] != '\0') {
+        snprintf(path, sizeof(path), "%s", from_env);
+        return path;
+    }
+
+    char root[900];
+    if (dir_of(__FILE__, root, sizeof(root))) {
+        snprintf(path, sizeof(path), "%s/passengers.dat", root);
+        return path;
+    }
+
+    snprintf(path, sizeof(path), "passengers.dat");
+    return path;
+}
+
+/* 带保护的过期票清理。直接调 remove_expired_passengers 有误删风险：
+   它按 travel_date < today 全量删除，而 today 来自系统时钟，
+   时钟被改错、或带着笔记本跨时区，都可能把还没出行的票整批删掉。
+
+   这里做了两件事：
+
+   1) 年份闸门：today 必须落在 [2020, 2099]。挡住时钟被设成 1970 或 2999
+      这类极端情况。
+
+   2) 清理前备份：先把当前存档另存为 <路径>.before-expire-<时间戳>，
+      误删之后还能捞回来。这比「猜测时钟是否出错」直接得多。
+
+   注意：**刻意不做**「today 早于某个出行日期就判定时钟倒流」这种检查。
+   用户买了明天的票时，today < 最晚出行日期 是完全正常的，
+   那个判据会把正常的未来预订误判成时钟错误，导致清理被永久跳过。
+   真正的倒流检测需要持久化「上次运行日期」，属于另一个量级的改动。 */
+
+// 最近一次清理写出的备份文件路径；没写则为空串。供界面提示与测试使用。
+static char last_backup_path[700] = "";
+
+int purge_expired_passengers(const char *today, const char *archive_path,
+                             char *reason, size_t reasonsz) {
+    if (reason != NULL && reasonsz > 0) reason[0] = '\0';
+    last_backup_path[0] = '\0';   // 每次调用重置，避免调用方读到上一次的残留
+
+    if (!valid_date(today)) {
+        if (reason != NULL) snprintf(reason, reasonsz, "日期格式不正确，已跳过过期清理。");
+        return 0;
+    }
+
+    int year = (today[0] - '0') * 1000 + (today[1] - '0') * 100 +
+               (today[2] - '0') * 10 + (today[3] - '0');
+    if (year < 2020 || year > 2099) {
+        if (reason != NULL) {
+            snprintf(reason, reasonsz, "系统日期年份为 %d，不合理，已跳过过期清理。", year);
+        }
+        return 0;
+    }
+
+    // 先数一下有几条要删；一条都没有就不必备份
+    int doomed = 0;
+    for (Node *t = head; t != NULL; t = t->next) {
+        if (valid_date(t->data.travel_date) &&
+            strcmp(t->data.travel_date, today) < 0) {
+            doomed++;
+        }
+    }
+    if (doomed == 0) return 0;
+
+    if (archive_path != NULL) {
+        make_timestamped_name(archive_path, ".before-expire",
+                              last_backup_path, sizeof(last_backup_path));
+        remove(last_backup_path);
+        // 备份失败不阻断清理，只是这次没有后悔药 —— 不该因为备份不了就不清过期数据
+        if (!save_passengers(last_backup_path)) {
+            last_backup_path[0] = '\0';
+        }
+    }
+
+    return remove_expired_passengers(today);
+}
+
+const char *last_purge_backup_path(void) {
+    return last_backup_path;
 }
 
 // 保存到 filename：先写 filename.tmp，成功后才替换原文件。

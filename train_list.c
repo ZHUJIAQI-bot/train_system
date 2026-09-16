@@ -31,6 +31,39 @@ int read_int(const char *prompt, int *value) {
     return 1;
 }
 
+/* 读取一个「词」（跳过前导空白，读到下一个空白为止）。
+   比 scanf("%Ns") 多做一件事：超长输入会把该行剩余部分**丢弃**。
+
+   原来的写法有个隐蔽的坑：用户要是在姓名里多打了字，scanf 只吃掉限宽内的
+   那些字符，多出来的会留在输入缓冲里，被下一次读取当成出行日期 ——
+   于是用户看到「日期不合法」，却不知道自己哪里填错了。 */
+int read_word(const char *prompt, char *out, size_t size) {
+    int character;
+    size_t n = 0;
+
+    printf("%s", prompt);
+    if (size == 0) return 0;
+
+    do {
+        character = getchar();
+    } while (character == ' ' || character == '\t');
+
+    if (character == EOF) {
+        out[0] = '\0';
+        return 0;
+    }
+    while (character != EOF && character != '\n' &&
+           character != ' ' && character != '\t') {
+        if (n + 1 < size) out[n++] = (char)character;
+        character = getchar();
+    }
+    out[n] = '\0';
+
+    // 丢弃本行剩余内容，避免污染下一次读取
+    while (character != '\n' && character != EOF) character = getchar();
+    return 1;
+}
+
 // 显示全部旅客
 void print_all() {
     if (head == NULL) {
@@ -55,8 +88,8 @@ void print_all() {
 // 因此统计「全程空座」与「有被占用过的座位」两类，二者之和恒等于总座位数。
 void stat_by_carriage() {
     char train_no[8], date[20];
-    printf("车次(G1-G10)：");          scanf("%3s", train_no);
-    printf("出行日期(YYYY-MM-DD)：");   scanf("%10s", date);
+    if (!read_word("车次(G1-G10)：", train_no, sizeof(train_no))) return;
+    if (!read_word("出行日期(YYYY-MM-DD)：", date, sizeof(date))) return;
     if (!valid_train_no(train_no) || !valid_date(date)) {
         printf("车次或日期不合法。\n");
         return;
@@ -77,7 +110,7 @@ void sell_ticket() {
     int board, alight, firstclass;
     char err[160];
 
-    printf("身份证后4位：");   scanf("%19s", id);
+    if (!read_word("身份证后4位：", id, sizeof(id))) return;
     if (!valid_id(id)) {
         printf("身份证后4位不合法：应为4位数字，或3位数字+末尾x/X。\n");
         return;
@@ -86,9 +119,9 @@ void sell_ticket() {
         printf("该旅客已经购票，不能重复购票。\n");
         return;
     }
-    printf("姓名：");                    scanf("%19s", name);   // 限宽，避免超过 name[20] 越界
-    printf("出行日期(YYYY-MM-DD)：");    scanf("%10s", date);
-    printf("车次(G1-G10)：");            scanf("%3s", train_no);
+    if (!read_word("姓名：", name, sizeof(name))) return;
+    if (!read_word("出行日期(YYYY-MM-DD)：", date, sizeof(date))) return;
+    if (!read_word("车次(G1-G10)：", train_no, sizeof(train_no))) return;
     if (!read_int("上车站(0上海 1苏州 2南京 3济南 4天津 5北京)：", &board)) return;
     if (!read_int("下车站(0上海 1苏州 2南京 3济南 4天津 5北京)：", &alight)) return;
     if (!read_int("等级(0二等座 1一等座)：", &firstclass)) return;
@@ -96,6 +129,16 @@ void sell_ticket() {
     // 车次/日期/车站/方向/等级 全部交给模型层统一校验
     if (!validate_trip(train_no, date, board, alight, firstclass, err, sizeof(err))) {
         printf("%s\n", err);
+        return;
+    }
+
+    /* 出行日期不得早于今天。GUI 版的日期只能从下拉里选「今天起 4 天」，
+       天然没有这个问题；但控制台是手输，填了过去的日期也照样能过，
+       然后下次启动就被过期清理静默删掉 —— 用户看起来像「刚买的票丢了」。 */
+    char today[11];
+    today_string(today);
+    if (strcmp(date, today) < 0) {
+        printf("出行日期不能早于今天（%s）。\n", today);
         return;
     }
 
@@ -133,8 +176,7 @@ void sell_ticket() {
 // 旅客下车
 void passenger_alight() {
     char id[20];
-    printf("要退票的旅客身份证后4位：");
-    scanf("%19s", id);
+    if (!read_word("要退票的旅客身份证后4位：", id, sizeof(id))) return;
     if (delete_passenger(id)) {
         save_data();
         printf("旅客 %s 已退票。\n", id);
@@ -146,8 +188,7 @@ void passenger_alight() {
 // 按身份证查询
 void query_by_id() {
     char id[20];
-    printf("要查询的身份证后4位：");
-    scanf("%19s", id);
+    if (!read_word("要查询的身份证后4位：", id, sizeof(id))) return;
     Node *n = search_passenger(id);
     if (n == NULL) {
         printf("未找到该旅客。\n");
@@ -163,8 +204,8 @@ void query_by_id() {
 // 分类统计：指定车次+日期的各站上下车人数、各区段载客数与票款
 void statistics() {
     char train_no[8], date[20];
-    printf("车次(G1-G10)：");          scanf("%3s", train_no);
-    printf("出行日期(YYYY-MM-DD)：");   scanf("%10s", date);
+    if (!read_word("车次(G1-G10)：", train_no, sizeof(train_no))) return;
+    if (!read_word("出行日期(YYYY-MM-DD)：", date, sizeof(date))) return;
     if (!valid_train_no(train_no) || !valid_date(date)) {
         printf("车次或日期不合法。\n");
         return;
@@ -228,11 +269,14 @@ int main() {
     }
 
     char today[11];
+    char reason[128];
     today_string(today);
-    int expired = remove_expired_passengers(today);
+    int expired = purge_expired_passengers(today, default_data_file(), reason, sizeof(reason));
     if (expired > 0) {
         printf("已自动清理 %d 名过期旅客。\n", expired);
         save_data();
+    } else if (reason[0] != '\0') {
+        printf("提示：%s\n", reason);
     }
 
     int choice;

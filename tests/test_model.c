@@ -517,6 +517,147 @@ static void test_archive(void) {
     reset();
 }
 
+/* ---------------- 过期票清理保护 ----------------
+   remove_expired_passengers 按 travel_date < today 全量删除，而 today 来自
+   系统时钟；purge_expired_passengers 加了年份闸门与清理前备份。
+
+   注意这里**刻意没有**「today 早于最晚出行日期就判时钟倒流」的用例 ——
+   那个判据是错的：买了明天的票时 today < 最晚出行日期完全正常，
+   拿它当倒流信号会让清理被永久跳过。 */
+#define PURGE_BACKUP_BASE "test_purge_archive.dat"
+
+static void test_purge(void) {
+    printf("过期票清理保护\n");
+    char reason[128];
+
+    // 正常情况：清掉过去的票，保留未来的
+    reset();
+    insert_passenger(make("1111", "2026-09-10", "G2", 0, 2, 0, 3, 1));
+    insert_passenger(make("2222", "2026-09-20", "G2", 0, 2, 0, 3, 2));
+    check(purge_expired_passengers("2026-09-16", NULL, reason, sizeof(reason)) == 1,
+          "应清理 1 张过期票");
+    check(passenger_count() == 1, "应剩余 1 名旅客");
+
+    // 有未来预订是完全正常的，不该阻止清理
+    reset();
+    insert_passenger(make("1111", "2025-01-01", "G2", 0, 2, 0, 3, 1));
+    insert_passenger(make("2222", "2027-12-31", "G2", 0, 2, 0, 3, 2));
+    check(purge_expired_passengers("2026-09-16", NULL, reason, sizeof(reason)) == 1,
+          "存在远期预订时仍应清理过期票");
+    check(passenger_count() == 1, "远期预订应被保留");
+
+    // 年份越界：拒绝，且不删任何东西
+    reset();
+    insert_passenger(make("1111", "2026-09-10", "G2", 0, 2, 0, 3, 1));
+    check(purge_expired_passengers("1970-01-01", NULL, reason, sizeof(reason)) == 0,
+          "年份 1970 应拒绝清理");
+    check(reason[0] != '\0', "拒绝时应写出原因");
+    check(passenger_count() == 1, "被拒绝时不应删除任何数据");
+    check(purge_expired_passengers("2999-12-31", NULL, reason, sizeof(reason)) == 0,
+          "年份 2999 应拒绝清理");
+
+    // 日期格式非法
+    check(purge_expired_passengers("not-a-date", NULL, reason, sizeof(reason)) == 0,
+          "日期格式非法应拒绝清理");
+
+    // 边界：today 正好等于出行日期，不算过期
+    reset();
+    insert_passenger(make("1111", "2026-09-16", "G2", 0, 2, 0, 3, 1));
+    check(purge_expired_passengers("2026-09-16", NULL, reason, sizeof(reason)) == 0,
+          "今天等于出行日期时不算过期，应清理 0 条");
+    check(passenger_count() == 1, "当天出行的票不该被删");
+
+    // 空表
+    reset();
+    check(purge_expired_passengers("2026-09-16", NULL, reason, sizeof(reason)) == 0,
+          "空表应清理 0 条而不报错");
+
+    /* 清理前备份：这是防误删的真正手段 —— 与其猜时钟对不对，
+       不如保证删掉的东西还能捞回来。 */
+    reset();
+    insert_passenger(make("1111", "2026-09-10", "G2", 0, 2, 0, 3, 1));
+    insert_passenger(make("2222", "2026-09-20", "G2", 0, 2, 0, 3, 2));
+    int purged = purge_expired_passengers("2026-09-16", PURGE_BACKUP_BASE,
+                                          reason, sizeof(reason));
+    check(purged == 1, "带备份路径时仍应完成清理");
+    check(passenger_count() == 1, "清理后应只剩未过期的票");
+
+    const char *backup = last_purge_backup_path();
+    check(backup != NULL && backup[0] != '\0', "应记录下备份文件路径");
+    check(strstr(backup, ".before-expire") != NULL, "备份名应带 .before-expire 标记");
+
+    // 备份文件必须真实存在，而且里面装的是「清理前」的两条记录
+    FILE *backup_file = fopen(backup, "rb");
+    check(backup_file != NULL, "备份文件应能打开");
+    if (backup_file != NULL) {
+        char magic[5] = {0};
+        check(fread(magic, 1, 4, backup_file) == 4 && memcmp(magic, "TRNP", 4) == 0,
+              "备份文件应是合法的 v4 存档");
+        fseek(backup_file, 8, SEEK_SET);
+        unsigned char count_bytes[4];
+        int saved_count = -1;
+        if (fread(count_bytes, 1, 4, backup_file) == 4) {
+            saved_count = (int)((unsigned)count_bytes[0] | ((unsigned)count_bytes[1] << 8) |
+                                ((unsigned)count_bytes[2] << 16) | ((unsigned)count_bytes[3] << 24));
+        }
+        check(saved_count == 2, "备份里应是清理前的 2 条记录");
+        fclose(backup_file);
+        remove(backup);
+    }
+
+    // 无需清理时不应留下备份文件
+    reset();
+    insert_passenger(make("3333", "2099-01-01", "G2", 0, 2, 0, 3, 1));
+    check(purge_expired_passengers("2026-09-16", PURGE_BACKUP_BASE,
+                                   reason, sizeof(reason)) == 0,
+          "没有过期票时应清理 0 条");
+    check(last_purge_backup_path()[0] == '\0', "无需清理时不应写备份文件");
+    reset();
+}
+
+/* ---------------- 修订号（界面统计缓存的依据） ---------------- */
+static void test_revision(void) {
+    printf("修订号");
+    reset();
+
+    unsigned start = model_revision();
+    check(insert_passenger(make("1111", "2026-09-16", "G2", 0, 2, 0, 3, 1)) == INSERT_OK,
+          "插入应成功");
+    unsigned after_insert = model_revision();
+    check(after_insert != start, "插入后修订号应变化");
+
+    // 被拒绝的插入没有真正改变数据，不应打点 ——
+    // 否则界面会白白重算统计
+    check(insert_passenger(make("1111", "2026-09-16", "G2", 0, 2, 0, 3, 2)) == INSERT_DUPLICATE,
+          "重复身份证应被拒");
+    check(model_revision() == after_insert, "被拒的插入不应改变修订号");
+
+    check(delete_passenger("1111"), "删除应成功");
+    unsigned after_delete = model_revision();
+    check(after_delete != after_insert, "删除后修订号应变化");
+
+    check(!delete_passenger("9999"), "删不存在的记录应失败");
+    check(model_revision() == after_delete, "失败的删除不应改变修订号");
+
+    free_all_passengers();
+    check(model_revision() != after_delete, "清空后修订号应变化");
+}
+
+/* ---------------- 存档路径解析 ---------------- */
+static void test_data_file_path(void) {
+    printf("存档路径解析");
+
+    const char *path = default_data_file();
+    check(path != NULL && path[0] != '\0', "应返回非空路径");
+    check(strstr(path, "passengers.dat") != NULL,
+          "路径应指向 passengers.dat");
+
+    // 结果应被缓存：重复调用返回同一指针，且内容一致
+    const char *again = default_data_file();
+    check(again == path, "重复调用应返回缓存的同一指针");
+    check(strcmp(again, path) == 0, "两次调用内容应一致");
+}
+
 int main(void) {
     test_overlap();
     test_train();
@@ -527,6 +668,9 @@ int main(void) {
     test_indexes();
     test_stats();
     test_archive();
+    test_purge();
+    test_revision();
+    test_data_file_path();
     reset();
 
     printf("\n================================\n");

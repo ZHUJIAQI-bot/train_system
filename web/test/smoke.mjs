@@ -95,7 +95,7 @@ async function freshModule() {
     price:     cw('api_price', 'string', ['number', 'number', 'number']),
     load:      cw('api_load', 'string', ['string']),
     save:      cw('api_save', 'string', ['string']),
-    expire:    cw('api_expire', 'string', ['string']),
+    expire:    cw('api_expire', 'string', ['string', 'string']),
     diagToday: cw('api_diagnostic_today', 'string', [])
   };
   return { Module, api };
@@ -354,10 +354,34 @@ async function main() {
                 '（时区差异，业务逻辑已改为以 JS 为准）');
   }
 
+  // 过期清理：只有过去的票会被删，且删之前会写一份备份
   const exp = await freshModule();
   exp.api.sell('5000', 'X', tomorrow, 'G2', 0, 2, 0);
-  const expRes = j(exp.api.expire(today));
+  let expRes = j(exp.api.expire(today, ARCHIVE));
   check(expRes.ok && expRes.removed === 0, '未来日期的票不应被当作过期清理');
+  check(!expRes.reason, '无过期票时不该给出警告原因');
+
+  // 存在未来预订是完全正常的，不该阻止清理过去的票
+  exp.api.sell('5001', 'Y', today, 'G2', 0, 2, 0);
+  expRes = j(exp.api.expire(tomorrow, ARCHIVE));
+  check(expRes.ok && expRes.removed === 1, '今天出行的票在明天应被清理');
+  check(expRes.backup && expRes.backup.includes('.before-expire'),
+        '清理前应写出备份文件（实际 "' + expRes.backup + '"）');
+
+  // 备份内容应是清理前的两条记录
+  if (expRes.backup) {
+    const backupBytes = exp.Module.FS.readFile(expRes.backup);
+    check(backupBytes.length === 16 + 2 * RECORD_SIZE,
+          '备份里应是清理前的 2 条记录（实际 ' + backupBytes.length + ' 字节）');
+  }
+
+  // 年份越界的系统时钟应被年份闸门挡住
+  const expBad = await freshModule();
+  expBad.api.sell('5002', 'Z', '2026-01-01', 'G2', 0, 2, 0);
+  const badRes = j(expBad.api.expire('1970-01-01', ARCHIVE));
+  check(badRes.ok && badRes.removed === 0, '年份 1970 应被年份闸门挡住');
+  check(badRes.reason && badRes.reason.length > 0, '被挡住时应给出原因');
+  check(j(expBad.api.state()).count === 1, '被挡住时不应删除任何数据');
 
   // ---- 汇总 ----
   console.log('\n================================');

@@ -114,7 +114,8 @@ int seat_available(const char *train_no, const char *date,
                    int carriage, int seat, int board, int alight);
 int seats_available(const char *train_no, const char *date, int firstclass,
                     int board, int alight);
-// 选余票最多的合格车厢，再取该车厢最小可用座位号；成功返回 1
+// 选「当前旅客人数最少」的合格车厢，再取该车厢最小可用座位号；成功返回 1
+// 平局取车厢号小的，保证同等级各车厢人数差不超过 1。
 int assign_seat(const char *train_no, const char *date, int firstclass,
                 int board, int alight, int *out_carriage, int *out_seat);
 
@@ -127,6 +128,11 @@ int carriage_fully_free_seats(const char *train_no, const char *date, int carria
 int carriage_occupied_seats(const char *train_no, const char *date, int carriage);
 int occupied_seat_total(const char *date);                       // 去重 车次×车厢×座位
 int indexes_are_consistent(void);                                // 诊断：两棵索引与链表是否一致
+
+// 链表内容的修订号，每次增删改后递增。
+// 统计类函数是 O(n)~O(n²)，界面每帧都要画，数据没变时不该反复重算：
+// 调用方缓存上一次的修订号，变了才重新计算。
+unsigned model_revision(void);
 
 /* ---------------- 链表与索引 ---------------- */
 // insert_passenger 是唯一的入库漏斗：会重算 price 并拒绝重复身份证。
@@ -157,7 +163,32 @@ typedef enum {
 int save_passengers(const char *filename);    // 返回 0 表示写失败
 int load_passengers(const char *filename);    // 返回 LoadResult
 
-// 存档与分析文件的默认路径（绝对路径，与工作目录无关）
+/* ---------------- 存档路径 ----------------
+   路径不再写死，而是按以下顺序查找首个可用位置，结果缓存在静态缓冲里：
+     1. 环境变量 TRAIN_DATA_FILE
+     2. 可执行文件同级目录/passengers.dat   ← 整个项目挪到别的目录也能用
+     3. 项目根目录/passengers.dat           ← 相对编译期记录的 __FILE__ 推导
+     4. 当前工作目录/passengers.dat         ← 最后兜底
+   返回的是进程内静态缓冲的指针，不要 free。 */
 const char *default_data_file(void);
+
+/* ---------------- 过期票清理保护 ----------------
+   直接调 remove_expired_passengers 有误删风险：它按 travel_date < today
+   全量删除，而 today 来自系统时钟。时钟被改错、或跨时区旅行，
+   都可能把还没出行的票整批删掉。
+
+   改用这个入口，它会：
+     - 要求 today 的年份落在 [2020, 2099]，越界则拒绝清理
+     - 在真正删除前，把当前存档另存为 <archive_path>.before-expire-<时间戳>，
+       误删之后还能捞回来
+
+   archive_path 传 NULL 表示不做备份。返回实际删除条数；
+   被拒绝或无需清理时返回 0，原因写入 reason（可为 NULL）。 */
+int purge_expired_passengers(const char *today, const char *archive_path,
+                             char *reason, size_t reasonsz);
+
+// 最近一次清理写出的备份文件路径；没写则为空串。
+// 界面可以据此告诉用户去哪里找回误删的数据。
+const char *last_purge_backup_path(void);
 
 #endif /* TRAIN_MODEL_H */

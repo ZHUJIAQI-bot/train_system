@@ -508,27 +508,28 @@
   }
 
   // ---------------- 过期票清理 ----------------
-  /* remove_expired_passengers 会按日期全量删除，而浏览器里唯一副本就是
-     localStorage。用户时钟错、跨时区、书签放了很久，都可能让它误删。
-     这里加三道锁，都很便宜。 */
+  /* 清理过期票。伤害是「整批误删」，所以真正的手段是**删之前先备份**，
+     而不是去猜时钟对不对。
+
+     C 侧会做年份闸门并把清理前的存档另存为 .before-expire-<时间戳>；
+     这里再把 localStorage 里的原始 blob 也留一份，双保险。
+
+     刻意**不做**「today 早于最晚出行日期就判时钟倒流」：用户买了明天的票时
+     today < 最晚出行日期 完全正常，那个判据会把正常清理永久挡住。
+     （这个错误我最初就写过，被单元测试抓出来了。） */
   function purgeExpired() {
     const today = todayString();
-    const year = parseInt(today.slice(0, 4), 10);
-    if (year < 2020 || year > 2099) { setStatus(t('warnClock'), true); return; }
+    const res = JSON.parse(api.expire(today, ARCHIVE_PATH));
+    if (!res.ok) { setStatus(res.message || t('warnClock'), true); return; }
 
-    // 时钟倒流检测：今天的日期早于任何一张票的出行日期，说明系统时间不对
-    let maxDate = '';
-    state.passengers.forEach((p) => { if (p.date > maxDate) maxDate = p.date; });
-    if (maxDate && today < maxDate) { setStatus(t('warnClock'), true); return; }
-
-    const res = JSON.parse(api.expire(today));
-    if (res.ok && res.removed > 0) {
-      // 清理前先备份，给用户一次后悔的机会
+    if (res.removed > 0) {
       const before = lsGet(LS_ARCHIVE);
       if (before) lsSet(LS_BEFORE_EXPIRE, before);
       persist();
       setStatus(fmt('warnExpired', { n: res.removed }));
       refresh();
+    } else if (res.reason) {
+      setStatus(res.reason, true);
     }
   }
 
@@ -549,7 +550,7 @@
       price:      Module.cwrap('api_price', 'string', ['number', 'number', 'number']),
       load:       Module.cwrap('api_load', 'string', ['string']),
       save:       Module.cwrap('api_save', 'string', ['string']),
-      expire:     Module.cwrap('api_expire', 'string', ['string']),
+      expire:     Module.cwrap('api_expire', 'string', ['string', 'string']),
       diagToday:  Module.cwrap('api_diagnostic_today', 'string', [])
     };
 

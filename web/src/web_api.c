@@ -434,18 +434,27 @@ EMSCRIPTEN_KEEPALIVE const char *api_seats_left(const char *train_no, const char
 }
 
 /* 清理出行日期早于 today 的旅客。
-   调用方（JS）必须先做三道防护：时钟倒流检测、年份范围校验、清理前备份。
-   这里只负责执行，并在返回值里报告删了多少条。 */
-EMSCRIPTEN_KEEPALIVE const char *api_expire(const char *today) {
+   走 purge_expired_passengers：它会做年份闸门，并在真正删除前把当前存档
+   另存为 <path>.before-expire-<时间戳>，误删之后还能捞回来。
+
+   注意这里**不做**「today 早于最晚出行日期就判时钟倒流」那种检查 ——
+   用户买了明天的票时 that 判据会误触发，把正常清理永久挡住。 */
+EMSCRIPTEN_KEEPALIVE const char *api_expire(const char *today, const char *archive_path) {
     if (today == NULL || !valid_date(today)) {
         return resp_fail("invalid_date", "日期格式不正确");
     }
-    int removed = remove_expired_passengers(today);
+    char reason[128];
+    int removed = purge_expired_passengers(today, archive_path, reason, sizeof(reason));
+
     json_reset();
     json_puts("{\"ok\":true,\"code\":\"ok\",");
     json_int_field("removed", removed);
     json_puts(",");
     json_int_field("count", passenger_count());
+    json_puts(",");
+    json_str_field("reason", reason);
+    json_puts(",");
+    json_str_field("backup", last_purge_backup_path());
     json_puts("}");
     return json_finish();
 }

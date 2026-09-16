@@ -31,7 +31,7 @@ static const char *gui_stations[6] = {
 static bool date_dropdown_open;
 static int selected_date_option;
 static bool train_dropdown_open;
-static int selected_train_option;
+static int selected_train_number;
 static int station_dropdown_open = -1;
 static bool class_dropdown_open;
 
@@ -277,9 +277,13 @@ static void draw_field_error(const TextField *field, Rectangle bounds, const cha
     }
 }
 
+// 车次下拉最多列出几个候选（每个方向 5 班）
+#define TRAIN_OPTION_MAX 5
+
 static bool button(Rectangle bounds, const char *label, bool selected);
-static int train_option_count(const TextField *fields);
-static void set_train_field(TextField *field, const TextField *fields, int option);
+static bool train_stations_ready(const TextField *fields);
+static int collect_train_options(const TextField *fields, int *out);
+static void set_train_number_field(TextField *field, int train_number);
 
 static void draw_cover(void) {
     int center_x = WINDOW_WIDTH / 2;
@@ -323,9 +327,67 @@ static void draw_sidebar(View view) {
     DrawText(tr("列车管理系统", "TRAIN MANAGEMENT"), 36, WINDOW_HEIGHT - 42, 15, CNR_MUTED);
 }
 
-static void draw_dashboard(void) {
+/* ---------------- 统计缓存 ----------------
+   界面每帧（60fps）都要画仪表盘和统计页，而涉及的统计函数是 O(n)~O(n²)：
+   occupied_seat_total 是双重循环去重，carriage_occupied_seats 对每节车厢
+   都要扫一遍全部旅客。数据几十人时无感，上千人就会明显掉帧。
+
+   这里按「链表修订号 + 查询参数」缓存，只有真正变了才重算。
+   修订号由模型层在每次增删改时递增，比让调用方自己记「什么时候该刷新」可靠。 */
+static unsigned dashboard_revision = 0;
+static char dashboard_date[11];
+static int dashboard_count = 0;
+static int dashboard_occupied = 0;
+static bool dashboard_cached = false;
+
+static void update_dashboard_cache(void) {
     char today[11];
     today_string(today);
+    unsigned revision = model_revision();
+    if (dashboard_cached && revision == dashboard_revision &&
+        strcmp(today, dashboard_date) == 0) {
+        return;
+    }
+    dashboard_revision = revision;
+    snprintf(dashboard_date, sizeof(dashboard_date), "%s", today);
+    dashboard_count = passenger_count();
+    dashboard_occupied = occupied_seat_total(today);
+    dashboard_cached = true;
+}
+
+static unsigned stats_revision = 0;
+static char stats_train[6];
+static char stats_date[11];
+static int stats_used[CARRIAGE_COUNT + 1];
+static int stats_free[CARRIAGE_COUNT + 1];
+static int stats_load[SEGMENT_COUNT];
+static int stats_total_seats = 0;
+static bool stats_cached = false;
+
+static void update_stats_cache(const char *train_no, const char *date) {
+    unsigned revision = model_revision();
+    if (stats_cached && revision == stats_revision &&
+        strcmp(train_no, stats_train) == 0 && strcmp(date, stats_date) == 0) {
+        return;
+    }
+    stats_revision = revision;
+    snprintf(stats_train, sizeof(stats_train), "%s", train_no);
+    snprintf(stats_date, sizeof(stats_date), "%s", date);
+
+    stats_total_seats = 0;
+    for (int c = 1; c <= CARRIAGE_COUNT; c++) {
+        stats_used[c] = carriage_occupied_seats(train_no, date, c);
+        stats_free[c] = car_seats[c] - stats_used[c];
+        stats_total_seats += car_seats[c];
+    }
+    for (int i = 0; i < SEGMENT_COUNT; i++) {
+        stats_load[i] = segment_load(train_no, date, i);
+    }
+    stats_cached = true;
+}
+
+static void draw_dashboard(void) {
+    update_dashboard_cache();
 
     DrawText(tr("运行总览", "Dashboard"), CONTENT_X, 42, 34, CNR_TEXT);
     DrawText(tr("今日列车运行情况", "Today's train operation at a glance"), CONTENT_X + 2, 84, 18, CNR_MUTED);
@@ -334,14 +396,14 @@ static void draw_dashboard(void) {
     DrawRectangleLinesEx((Rectangle){CONTENT_X, 140, 290, 128}, 1, CNR_BORDER);
     // 链表中含未来日期的票，故不写「当前在车」
     DrawText(tr("售票总数", "TICKETS SOLD"), CONTENT_X + 22, 164, 16, CNR_RED);
-    DrawText(TextFormat("%d", passenger_count()), CONTENT_X + 22, 196, 42, CNR_TEXT);
+    DrawText(TextFormat("%d", dashboard_count), CONTENT_X + 22, 196, 42, CNR_TEXT);
     DrawText(tr("张", "tickets"), CONTENT_X + 24, 242, 16, CNR_MUTED);
 
     DrawRectangleRounded((Rectangle){CONTENT_X + 320, 140, 290, 128}, 0.06f, 6, WHITE);
     DrawRectangleLinesEx((Rectangle){CONTENT_X + 320, 140, 290, 128}, 1, CNR_BORDER);
     // 区段复用下「剩余座位」没有单一定义，改为按车次去重的已占用座位数
     DrawText(tr("今日已占用座位", "SEATS TAKEN TODAY"), CONTENT_X + 342, 164, 16, CNR_RED);
-    DrawText(TextFormat("%d", occupied_seat_total(today)), CONTENT_X + 342, 196, 42, CNR_TEXT);
+    DrawText(TextFormat("%d", dashboard_occupied), CONTENT_X + 342, 196, 42, CNR_TEXT);
     DrawText(tr("个（按车次去重）", "seat-slots booked"), CONTENT_X + 344, 242, 16, CNR_MUTED);
 
     DrawText(tr("快捷操作", "Quick actions"), CONTENT_X, 334, 24, CNR_TEXT);
@@ -468,23 +530,30 @@ static void draw_sell_view(TextField *fields) {
     }
     DrawText("v", (int)train_bounds.x + (int)train_bounds.width - 28, (int)train_bounds.y + 11, 18, CNR_RED);
     if (train_dropdown_open) {
-        int option_count = train_option_count(fields);
+        int train_numbers[TRAIN_OPTION_MAX];
+        int option_count = collect_train_options(fields, train_numbers);
         int dropdown_height = option_count > 0 ? option_count * 30 : 34;
         DrawRectangle((int)train_bounds.x, (int)train_bounds.y + 44,
                       (int)train_bounds.width, dropdown_height, WHITE);
         DrawRectangleLinesEx((Rectangle){train_bounds.x, train_bounds.y + 44,
                                          train_bounds.width, dropdown_height}, 1, CNR_BORDER);
         if (option_count == 0) {
-            DrawText(tr("请先选择北京和上海", "Select Beijing and Shanghai first"),
+            // 两种成因要分开说，否则用户不知道该改哪里
+            bool stations_ok = train_stations_ready(fields);
+            DrawText(stations_ok
+                         ? tr("该区间已无余票", "No seats left on this leg")
+                         : tr("请先选择上下车站", "Select board and alight stations first"),
                      (int)train_bounds.x + 12, (int)train_bounds.y + 52, 14, CNR_MUTED);
         } else {
-            int board = atoi(fields[2].text);
             for (int i = 0; i < option_count; i++) {
                 char train_text[32];
-                int train_number = board > atoi(fields[3].text) ? i * 2 + 1 : i * 2 + 2;
-                snprintf(train_text, sizeof(train_text), "G%d   %02d:%02d",
-                         train_number, 6 + i, board > atoi(fields[3].text) ? 0 : 30);
-                Color row_color = i == selected_train_option ? (Color){226, 240, 250, 255} : WHITE;
+                char depart[6];
+                int number = train_numbers[i];
+                train_depart_time(number, depart);
+                snprintf(train_text, sizeof(train_text), "%s   %s",
+                         TextFormat("G%d", number), depart);
+                Color row_color = number == selected_train_number
+                                      ? (Color){226, 240, 250, 255} : WHITE;
                 DrawRectangle((int)train_bounds.x + 2, (int)train_bounds.y + 46 + i * 30,
                               (int)train_bounds.width - 4, 27, row_color);
                 DrawText(train_text, (int)train_bounds.x + 16,
@@ -588,21 +657,64 @@ static float passenger_scroll = 0.0f;
 static char  pending_refund_id[8];
 static bool  has_pending_refund = false;
 
+/* 按身份证筛选。控制台版一直有「按身份证查询」菜单项，
+   而 GUI 之前只能靠滚动列表肉眼找，这里补上。 */
+static TextField passenger_search;
+static bool passenger_search_active = false;
+
+static Rectangle passenger_search_bounds(void) {
+    return (Rectangle){WINDOW_WIDTH - 400, 44, 340, 38};
+}
+
+static bool passenger_matches_search(const Passenger *p) {
+    if (passenger_search.length == 0) return true;
+    // 身份证只有 4 位，子串匹配即可满足「输入前几位筛选」
+    return strstr(p->id, passenger_search.text) != NULL;
+}
+
 static Rectangle refund_button_bounds(int y) {
     return (Rectangle){WINDOW_WIDTH - 136, (float)(y + 2), 96, 24};
 }
 
 static void draw_passengers_view(void) {
+    update_dashboard_cache();
+
     int total = passenger_count();
+    int matched = 0;
+    for (Node *t = head; t != NULL; t = t->next) {
+        if (passenger_matches_search(&t->data)) matched++;
+    }
+
     int visible = PASSENGER_VISIBLE_ROWS;
-    int max_scroll = total > visible ? total - visible : 0;
+    int max_scroll = matched > visible ? matched - visible : 0;
     if (passenger_scroll > (float)max_scroll) passenger_scroll = (float)max_scroll;
     if (passenger_scroll < 0.0f) passenger_scroll = 0.0f;
     int first = (int)passenger_scroll;
 
     DrawText(tr("旅客列表", "Passengers"), PANEL_X + 42, 42, 34, CNR_TEXT);
-    DrawText(TextFormat(tr("共 %d 名旅客", "%d passengers on record"), total),
-             PANEL_X + 44, 84, 18, CNR_MUTED);
+    if (passenger_search.length > 0) {
+        DrawText(TextFormat(tr("匹配 %d / 共 %d 名", "%d of %d match"), matched, total),
+                 PANEL_X + 44, 84, 18, CNR_MUTED);
+    } else {
+        DrawText(TextFormat(tr("共 %d 名旅客", "%d passengers on record"), total),
+                 PANEL_X + 44, 84, 18, CNR_MUTED);
+    }
+
+    // 搜索框
+    Rectangle search = passenger_search_bounds();
+    DrawRectangleRec(search, WHITE);
+    DrawRectangleLinesEx(search, 2, passenger_search_active ? CNR_RED : CNR_BORDER);
+    if (passenger_search.length == 0) {
+        DrawText(tr("按身份证后4位筛选", "Filter by ID suffix"),
+                 (int)search.x + 12, (int)search.y + 9, 17, CNR_MUTED);
+    } else {
+        DrawText(passenger_search.text, (int)search.x + 12, (int)search.y + 9, 17, CNR_TEXT);
+    }
+    if (passenger_search_active && ((int)(GetTime() * 2) % 2 == 0)) {
+        int width = (int)MeasureTextEx(ui_font, passenger_search.text, 17, 0).x;
+        DrawLine((int)search.x + 12 + width, (int)search.y + 8,
+                 (int)search.x + 12 + width, (int)search.y + 32, CNR_RED);
+    }
     DrawText(tr("证件", "ID"), PANEL_X + 42, 138, 16, CNR_RED);
     DrawText(tr("姓名", "NAME"), PANEL_X + 128, 138, 16, CNR_RED);
     DrawText(tr("行程", "ROUTE"), PANEL_X + 296, 138, 16, CNR_RED);
@@ -617,10 +729,12 @@ static void draw_passengers_view(void) {
                      PASSENGER_LIST_BOTTOM - PASSENGER_LIST_TOP);
 
     int row = 0;
-    for (Node *node = head; node != NULL; node = node->next, row++) {
-        if (row < first) continue;
+    for (Node *node = head; node != NULL; node = node->next) {
+        if (!passenger_matches_search(&node->data)) continue;
         if (row >= first + visible) break;
+        if (row < first) { row++; continue; }
         int y = PASSENGER_LIST_TOP + (row - first) * PASSENGER_ROW_HEIGHT;
+        row++;
         DrawLine(PANEL_X + 42, y + 25, WINDOW_WIDTH - 44, y + 25, CNR_BORDER);
         DrawText(node->data.id, PANEL_X + 42, y, 17, CNR_TEXT);
         draw_passenger_name(node->data.name, PANEL_X + 128, y, 17, CNR_TEXT);
@@ -645,8 +759,10 @@ static void draw_passengers_view(void) {
     }
     EndScissorMode();
 
-    if (total == 0) {
-        DrawText(tr("暂无旅客。", "No passengers yet."), PANEL_X + 42, PASSENGER_LIST_TOP + 10, 18, CNR_MUTED);
+    if (matched == 0) {
+        DrawText(total == 0 ? tr("暂无旅客。", "No passengers yet.")
+                            : tr("没有匹配的旅客。", "No matching passenger."),
+                 PANEL_X + 42, PASSENGER_LIST_TOP + 10, 18, CNR_MUTED);
     } else if (max_scroll > 0) {
         DrawText(tr("滚轮可滚动列表", "Scroll with the mouse wheel"),
                  PANEL_X + 42, PASSENGER_LIST_BOTTOM + 10, 15, CNR_MUTED);
@@ -672,8 +788,8 @@ static void draw_stats_view(void) {
     date_offset_string(stats_date_option, date);
     snprintf(train_no, sizeof(train_no), "G%d", stats_train_number);
 
-    int total_seats = 0;
-    for (int c = 1; c <= CARRIAGE_COUNT; c++) total_seats += car_seats[c];
+    update_stats_cache(train_no, date);
+    int total_seats = stats_total_seats;
 
     DrawText(tr("统计信息", "Statistics"), PANEL_X + 42, 42, 34, CNR_TEXT);
     DrawText(tr("按车次与日期统计", "Per train and date"), PANEL_X + 44, 84, 18, CNR_MUTED);
@@ -695,8 +811,8 @@ static void draw_stats_view(void) {
     DrawText(tr("各车厢座位", "Seats by carriage"), PANEL_X + 42, y, 20, CNR_TEXT);
     y += 32;
     for (int c = 1; c <= CARRIAGE_COUNT; c++) {
-        int used = carriage_occupied_seats(train_no, date, c);
-        int fully_free = carriage_fully_free_seats(train_no, date, c);
+        int used = stats_used[c];
+        int fully_free = stats_free[c];
         char label[28];
         char detail[56];
         if (language == LANGUAGE_ZH) {
@@ -724,7 +840,7 @@ static void draw_stats_view(void) {
     for (int i = 0; i < SEGMENT_COUNT; i++) {
         char label[40];
         char detail[32];
-        int load = segment_load(train_no, date, i);
+        int load = stats_load[i];
         if (language == LANGUAGE_ZH) {
             snprintf(label, sizeof(label), "%s-%s", stations[i], stations[i + 1]);
         } else {
@@ -813,23 +929,53 @@ static void set_date_field(TextField *field, int option) {
     selected_date_option = option;
 }
 
-static int train_option_count(const TextField *fields) {
+/* 车次下拉的可选项，把车次号写进 out，返回个数。
+
+   区段复用下「售罄」是按区间算的，所以只有选好上下车站才能判断某个车次
+   还有没有票。原来恒返回 5 个，售罄的车次也照样列出来让用户选，
+   选完才报「已售罄」—— 这里直接把它过滤掉。
+
+   等级尚未选择时不做过滤：否则下拉会在用户还没选等级时突然变空。 */
+
+// 上下车站是否已选好且合法。用来区分下拉为空的两种成因：
+// 「还没填站点」和「这个区间确实没票了」，两者该给不同的提示。
+static bool train_stations_ready(const TextField *fields) {
     if (fields[2].length == 0 || fields[3].length == 0 ||
-        !is_integer_text(fields[2].text) || !is_integer_text(fields[3].text)) return 0;
+        !is_integer_text(fields[2].text) || !is_integer_text(fields[3].text)) return false;
     int board = atoi(fields[2].text);
     int alight = atoi(fields[3].text);
-    if (board == alight || board < 0 || board > 5 || alight < 0 || alight > 5) return 0;
-    return 5;
+    return board != alight && board >= 0 && board <= 5 && alight >= 0 && alight <= 5;
 }
 
-static void set_train_field(TextField *field, const TextField *fields, int option) {
+static int collect_train_options(const TextField *fields, int *out) {
+    if (!train_stations_ready(fields)) return 0;
     int board = atoi(fields[2].text);
     int alight = atoi(fields[3].text);
-    int train_number = board > alight ? option * 2 + 1 : option * 2 + 2;
+
+    int firstclass = -1;
+    if (fields[4].length > 0 && is_integer_text(fields[4].text)) {
+        firstclass = atoi(fields[4].text);
+    }
+    int filter_by_seats = (firstclass == 0 || firstclass == 1);
+
+    int count = 0;
+    for (int k = 0; k < TRAIN_OPTION_MAX; k++) {
+        int number = board > alight ? k * 2 + 1 : k * 2 + 2;
+        if (filter_by_seats) {
+            char code[6];
+            snprintf(code, sizeof(code), "G%d", number);
+            if (seats_available(code, fields[5].text, firstclass, board, alight) <= 0) continue;
+        }
+        out[count++] = number;
+    }
+    return count;
+}
+
+static void set_train_number_field(TextField *field, int train_number) {
     snprintf(field->text, sizeof(field->text), "G%d", train_number);
     field->length = (int)strlen(field->text);
     field->invalid = false;
-    selected_train_option = option;
+    selected_train_number = train_number;
 }
 
 int main(void) {
@@ -863,12 +1009,16 @@ int main(void) {
                  tr("内存不足，无法读取存档。", "Not enough memory to load the save file."));
     }
     char today[11];
+    char purge_reason[128];
     today_string(today);
-    int expired_count = remove_expired_passengers(today);
+    int expired_count = purge_expired_passengers(today, DATA_FILE, purge_reason, sizeof(purge_reason));
     if (expired_count > 0) {
         save_passengers(DATA_FILE);
         snprintf(status, sizeof(status), tr("已自动清理%d名过期旅客。", "%d expired passengers removed."),
                  expired_count);
+    } else if (purge_reason[0] != '\0') {
+        // 时钟异常等情况下跳过清理，必须让用户看到，否则会以为程序坏了
+        snprintf(status, sizeof(status), "%s", purge_reason);
     }
 
     while (!WindowShouldClose()) {
@@ -878,11 +1028,14 @@ int main(void) {
         strftime(loop_today, sizeof(loop_today), "%Y-%m-%d", &loop_date);
         if (strcmp(loop_today, today) != 0) {
             strcpy(today, loop_today);
-            int expired_count = remove_expired_passengers(today);
+            char reason[128];
+            int expired_count = purge_expired_passengers(today, DATA_FILE, reason, sizeof(reason));
             if (expired_count > 0) {
                 save_passengers(DATA_FILE);
                 snprintf(status, sizeof(status), tr("已自动清理%d名过期旅客。", "%d expired passengers removed."),
                          expired_count);
+            } else if (reason[0] != '\0') {
+                snprintf(status, sizeof(status), "%s", reason);
             }
         }
         if (view == VIEW_PASSENGERS) {
@@ -925,6 +1078,10 @@ int main(void) {
                     if (CheckCollisionPointRec(mouse, stats_train_button(i))) stats_train_number = i + 1;
                 }
             }
+            if (view == VIEW_PASSENGERS) {
+                // 点在搜索框以外就取消聚焦
+                passenger_search_active = CheckCollisionPointRec(mouse, passenger_search_bounds());
+            }
             if (view == VIEW_SELL) {
                 bool station_dropdown_handled = false;
                 for (int station_field = 2; station_field <= 3; station_field++) {
@@ -949,7 +1106,7 @@ int main(void) {
                             fields[station_field].invalid = false;
                             fields[6].text[0] = '\0';
                             fields[6].length = 0;
-                            selected_train_option = 0;
+                            selected_train_number = 0;
                             station_dropdown_open = -1;
                             station_dropdown_handled = true;
                         }
@@ -1003,14 +1160,18 @@ int main(void) {
                     fields[active_field].active = false;
                     active_field = 6;
                     fields[active_field].active = true;
-                } else if (!station_dropdown_handled && train_dropdown_open &&
-                           CheckCollisionPointRec(mouse, (Rectangle){train_bounds.x, train_bounds.y + 44,
-                                                                    train_bounds.width,
-                                                                    train_option_count(fields) > 0 ? train_option_count(fields) * 30 : 34})) {
-                    int option = (int)((mouse.y - train_bounds.y - 44) / 30);
-                    int option_count = train_option_count(fields);
-                    if (option >= 0 && option < option_count) {
-                        set_train_field(&fields[6], fields, option);
+                } else if (!station_dropdown_handled && train_dropdown_open) {
+                    int train_numbers[TRAIN_OPTION_MAX];
+                    int option_count = collect_train_options(fields, train_numbers);
+                    int dropdown_height = option_count > 0 ? option_count * 30 : 34;
+                    if (CheckCollisionPointRec(mouse, (Rectangle){train_bounds.x, train_bounds.y + 44,
+                                                                  train_bounds.width, dropdown_height})) {
+                        int option = (int)((mouse.y - train_bounds.y - 44) / 30);
+                        if (option >= 0 && option < option_count) {
+                            set_train_number_field(&fields[6], train_numbers[option]);
+                            train_dropdown_open = false;
+                        }
+                    } else {
                         train_dropdown_open = false;
                     }
                 } else {
@@ -1026,7 +1187,7 @@ int main(void) {
                             station_dropdown_open = i;
                             fields[6].text[0] = '\0';
                             fields[6].length = 0;
-                            selected_train_option = 0;
+                            selected_train_number = 0;
                         }
                     }
                 }
@@ -1039,6 +1200,9 @@ int main(void) {
         if (view == VIEW_SELL) {
             if (active_field != 5 && active_field != 6) handle_text_input(&fields[active_field]);
             validate_form_fields(fields);
+        }
+        if (view == VIEW_PASSENGERS && passenger_search_active) {
+            handle_text_input(&passenger_search);
         }
 
         if (view == VIEW_SELL && IsKeyPressed(KEY_TAB)) {
