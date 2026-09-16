@@ -33,6 +33,11 @@
       carriageTitle: '各车厢座位', segmentTitle: '各区段载客',
       exportArchive: '导出存档', importArchive: '导入存档',
       refund: '退票', passCount: '共 {n} 名旅客',
+      searchPlaceholder: '按身份证后 4 位筛选',
+      searchMatch: '匹配 {n} / 共 {m} 名',
+      noMatch: '没有匹配的旅客。',
+      trainNoSeats: '该区间已无余票',
+      trainSelectStations: '请先选择上下车站',
       seatFree: '空闲 {n}', seatUsed: '占用 {n}', headcount: '人数 {n}',
       segLoad: '{n} / {m} 人',
       errIdLength: '身份证后 4 位应为 4 位半角数字（末位可为 x）',
@@ -79,6 +84,11 @@
       carriageTitle: 'Seats by carriage', segmentTitle: 'Passengers per segment',
       exportArchive: 'Export save', importArchive: 'Import save',
       refund: 'Refund', passCount: '{n} passenger(s) on record',
+      searchPlaceholder: 'Filter by ID suffix',
+      searchMatch: '{n} of {m} match',
+      noMatch: 'No matching passenger.',
+      trainNoSeats: 'No seats left on this leg',
+      trainSelectStations: 'Select board and alight stations first',
       seatFree: '{n} free', seatUsed: '{n} used', headcount: '{n} people',
       segLoad: '{n} / {m}',
       errIdLength: 'ID suffix must be 4 half-width digits (last may be x)',
@@ -246,17 +256,60 @@
   }
 
   // ---------------- 初始化下拉框 ----------------
+  /* 方向与发车时间都由 C 提供，前端不再自己推算，避免和模型层漂移 */
+  function trainLabel(t) {
+    const dir = lang === 'zh'
+      ? (t.northbound ? '北京→上海' : '上海→北京')
+      : (t.northbound ? 'Beijing→Shanghai' : 'Shanghai→Beijing');
+    return t.code + '  ' + dir + ' ' + t.depart;
+  }
+
+  function allTrainItems() {
+    return options.trains.map((t) => ({ value: t.code, label: trainLabel(t) }));
+  }
+
+  /* 售票页的车次下拉只列「这个区间、这个等级还有票」的车次。
+
+     原来恒列全部车次，售罄的也照样能选，选完才报「已售罄」。
+     等级尚未选择时不做余票过滤 —— 否则下拉会在用户还没选等级时突然变空，
+     看起来像坏了。 */
+  function rebuildTrainOptions() {
+    const select = document.getElementById('f-train');
+    const previous = select.value;
+    const board = selectInt('f-board');
+    const alight = selectInt('f-alight');
+    const firstclass = selectInt('f-class');
+    const date = selectStr('f-date');
+
+    let items;
+    if (board < 0 || alight < 0 || board === alight) {
+      items = allTrainItems();          // 方向未知，列出全部
+    } else {
+      const wantNorthbound = board > alight;   // 站号递减 = 北京→上海
+      const candidates = options.trains.filter(
+        (t) => (t.northbound === 1) === wantNorthbound);
+      if (firstclass < 0) {
+        items = candidates.map((t) => ({ value: t.code, label: trainLabel(t) }));
+      } else {
+        items = [];
+        candidates.forEach((t) => {
+          const res = JSON.parse(api.seatsLeft(t.code, date, board, alight, firstclass));
+          if (res.ok && res.seats > 0) {
+            items.push({ value: t.code, label: trainLabel(t) });
+          }
+        });
+      }
+    }
+
+    fillSelect(select, items);
+    // 尽量保留用户原本的选择，别因为重建而把它冲掉
+    if (items.some((i) => i.value === previous)) select.value = previous;
+  }
+
   function buildSelects() {
     const stationItems = options.stations.map((_, i) => ({
       value: i, label: i + '  ' + stationName(i)
     }));
-    // 方向与发车时间由 C 提供，前端不再自己推算（避免和模型层漂移）
-    const trainItems = options.trains.map((t) => {
-      const dir = lang === 'zh'
-        ? (t.northbound ? '北京→上海' : '上海→北京')
-        : (t.northbound ? 'Beijing→Shanghai' : 'Shanghai→Beijing');
-      return { value: t.code, label: t.code + '  ' + dir + ' ' + t.depart };
-    });
     const dateItems = [];
     for (let i = 0; i < DATE_OPTIONS; i++) {
       const d = dateOption(i);
@@ -265,8 +318,8 @@
 
     fillSelect(document.getElementById('f-date'), dateItems);
     fillSelect(document.getElementById('s-date'), dateItems);
-    fillSelect(document.getElementById('f-train'), trainItems);
-    fillSelect(document.getElementById('s-train'), trainItems);
+    // 统计页要能查任意车次（包括已售罄的），不按余票过滤
+    fillSelect(document.getElementById('s-train'), allTrainItems());
     fillSelect(document.getElementById('s-class'), [
       { value: 0, label: t('classSecond') }, { value: 1, label: t('classFirst') }
     ]);
@@ -275,6 +328,9 @@
     fillSelect(document.getElementById('f-board'), stationItems);
     fillSelect(document.getElementById('f-alight'), stationItems);
     document.getElementById('f-alight').value = String(Math.min(2, options.stations.length - 1));
+
+    // 售票页的车次依赖上下车站与等级，放在站点之后再建
+    rebuildTrainOptions();
   }
 
   // ---------------- 售票表单 ----------------
@@ -319,9 +375,16 @@
     nameNote.textContent = f.name ? bytes + ' / 19 bytes' : '';
     nameNote.classList.toggle('is-error', bytes > 19);
 
+    const trainSelect = document.getElementById('f-train');
     const trainNote = document.getElementById('train-note');
-    if (f.board < 0 || f.alight < 0 || f.board === f.alight) {
+    const tripIncomplete = f.board < 0 || f.alight < 0 || f.board === f.alight;
+    if (trainSelect.options.length === 0) {
+      // 下拉为空有两种成因，要分开说，否则用户不知道该改哪里
+      trainNote.textContent = tripIncomplete ? t('trainSelectStations') : t('trainNoSeats');
+      trainNote.classList.add('is-error');
+    } else if (tripIncomplete || f.train === '') {
       trainNote.textContent = '';
+      trainNote.classList.remove('is-error');
     } else {
       const res = JSON.parse(api.seatsLeft(f.train, f.date, f.board, f.alight, f.firstclass));
       trainNote.textContent = res.ok ? fmt('seatsLeft', { n: res.seats }) : '';
@@ -375,10 +438,23 @@
     return td;
   }
 
+  // 按身份证筛选。与桌面版一致：身份证只有 4 位，子串匹配即可满足「输入前几位」
+  function searchQuery() {
+    return (document.getElementById('pass-search').value || '').trim().toUpperCase();
+  }
+
+  function passengerMatches(p) {
+    const query = searchQuery();
+    if (query === '') return true;
+    return p.id.toUpperCase().includes(query);
+  }
+
   function renderPassengers() {
     const body = document.getElementById('pass-body');
     body.textContent = '';
-    state.passengers.forEach((p) => {
+
+    const matched = state.passengers.filter(passengerMatches);
+    matched.forEach((p) => {
       const tr = document.createElement('tr');
       tr.appendChild(cell(p.id));
       tr.appendChild(cell(p.name));
@@ -401,8 +477,15 @@
 
       body.appendChild(tr);
     });
-    document.getElementById('pass-empty').hidden = state.passengers.length > 0;
-    document.getElementById('pass-hint').textContent = fmt('passCount', { n: state.count });
+    // 空列表的文案要区分「真的一条都没有」和「筛选后没匹配上」
+    const empty = document.getElementById('pass-empty');
+    empty.hidden = matched.length > 0;
+    empty.textContent = state.count === 0 ? t('passEmpty') : t('noMatch');
+
+    document.getElementById('pass-hint').textContent = searchQuery() === ''
+      ? fmt('passCount', { n: state.count })
+      : fmt('searchMatch', { n: matched.length, m: state.count });
+
     document.getElementById('s-count').textContent = String(state.count);
     document.getElementById('s-fare').textContent = String(state.totalFare);
   }
@@ -464,6 +547,8 @@
 
   function refresh() {
     state = JSON.parse(api.state());
+    // 必须重建车次候选：卖掉最后一张票之后，那个车次应当从下拉里消失
+    rebuildTrainOptions();
     renderPassengers();
     renderStats();
     refreshFormHints();
@@ -624,13 +709,22 @@
       e.target.value = '';
     });
 
+    // 旅客列表筛选
+    document.getElementById('pass-search').addEventListener('input', renderPassengers);
+
     // 表单联动
-    ['f-id', 'f-name', 'f-date', 'f-train', 'f-board', 'f-alight', 'f-class']
-      .forEach((id) => {
-        const el = document.getElementById(id);
-        el.addEventListener('input', refreshFormHints);
-        el.addEventListener('change', refreshFormHints);
-      });
+    ['f-id', 'f-name', 'f-train'].forEach((id) => {
+      const el = document.getElementById(id);
+      el.addEventListener('input', refreshFormHints);
+      el.addEventListener('change', refreshFormHints);
+    });
+    // 上下车站/等级/日期变了，车次的可选项也要跟着变（余票是按区间算的）
+    ['f-board', 'f-alight', 'f-class', 'f-date'].forEach((id) => {
+      const el = document.getElementById(id);
+      const update = () => { rebuildTrainOptions(); refreshFormHints(); };
+      el.addEventListener('input', update);
+      el.addEventListener('change', update);
+    });
 
     // 统计筛选
     ['s-date', 's-train', 's-class'].forEach((id) => {
@@ -655,6 +749,9 @@
       document.getElementById('lang-toggle').textContent = lang === 'zh' ? 'English' : '中文';
       document.querySelectorAll('[data-i18n]').forEach((el) => {
         el.textContent = t(el.dataset.i18n);
+      });
+      document.querySelectorAll('[data-i18n-placeholder]').forEach((el) => {
+        el.placeholder = t(el.dataset.i18nPlaceholder);
       });
       buildSelects();
       refresh();

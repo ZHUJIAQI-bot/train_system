@@ -69,15 +69,17 @@ const fire = (el, type) => el.dispatchEvent(new window.Event(type, { bubbles: tr
 console.log('DOM 接线');
 check(errors.length === 0, '页面不应有未捕获异常：' + errors.join(' | '));
 check($('f-date').options.length === 4, '日期下拉应有 4 项（实际 ' + $('f-date').options.length + '）');
-check($('f-train').options.length === 10, '车次下拉应有 10 项（实际 ' + $('f-train').options.length + '）');
+// 默认站点是「上海→南京」（站号递增），车次会按方向过滤成偶数车次
+check($('f-train').options.length === 5,
+      '默认上海→南京，应列出 5 个偶数车次（实际 ' + $('f-train').options.length + '）');
 check($('f-board').options.length === 6, '上车站下拉应有 6 项');
 check($('f-alight').options.length === 6, '下车站下拉应有 6 项');
 check($('f-class').options.length === 2, '等级下拉应有 2 项');
 
 const trainLabel = $('f-train').options[0].textContent;
-check(/G1/.test(trainLabel) && /06:00/.test(trainLabel),
-      'G1 选项应带方向与发车时间（实际 "' + trainLabel + '"）');
-check(/北京/.test(trainLabel), 'G1 应标为北京→上海方向');
+check(/G2/.test(trainLabel) && /06:30/.test(trainLabel),
+      '首个候选应为 G2 06:30（实际 "' + trainLabel + '"）');
+check(/上海→北京/.test(trainLabel), 'G2 应标为上海→北京方向');
 
 check($('s-count').textContent === '0', '初始售票数应为 0');
 
@@ -111,6 +113,77 @@ if (refundBtn) {
   check($('pass-body').children.length === 0, '退票后表格应为空');
   check(/已退票/.test($('status').textContent), '状态栏应显示退票成功');
 }
+
+console.log('旅客筛选');
+// 先造几条记录，方便验证筛选
+for (const [id, name] of [['2001', '甲'], ['2002', '乙'], ['3001', '丙']]) {
+  $('f-id').value = id;          fire($('f-id'), 'input');
+  $('f-name').value = name;      fire($('f-name'), 'input');
+  $('f-train').value = 'G2';     fire($('f-train'), 'change');
+  fire($('sell-form'), 'submit');
+  await wait(40);
+}
+const rows = () => $('pass-body').children.length;
+check(rows() === 3, '应先有 3 名旅客（实际 ' + rows() + '）');
+
+$('pass-search').value = '200'; fire($('pass-search'), 'input');
+await wait(60);
+check(rows() === 2, '筛选 "200" 应剩 2 行（实际 ' + rows() + '）');
+check(/匹配 2 \/ 共 3/.test($('pass-hint').textContent),
+      '计数应显示「匹配 2 / 共 3」（实际 "' + $('pass-hint').textContent + '"）');
+
+$('pass-search').value = '9999'; fire($('pass-search'), 'input');
+await wait(60);
+check(rows() === 0, '筛选无结果时应剩 0 行');
+check($('pass-empty').hidden === false && /没有匹配/.test($('pass-empty').textContent),
+      '无匹配时应显示「没有匹配的旅客」而不是「暂无旅客」');
+
+$('pass-search').value = ''; fire($('pass-search'), 'input');
+await wait(60);
+check(rows() === 3, '清空筛选后应恢复 3 行');
+
+console.log('车次下拉按方向与余票过滤');
+const trainOptions = () => Array.from($('f-train').options).map((o) => o.value);
+
+// 未选站点时应列出全部 10 个车次
+$('f-board').value = ''; fire($('f-board'), 'change');
+await wait(60);
+check(trainOptions().length === 10,
+      '未选站点时应列出全部车次（实际 ' + trainOptions().length + '）');
+
+// 上海(0)→南京(2) 是站号递增，只应有偶数车次
+$('f-board').value = '0'; fire($('f-board'), 'change');
+$('f-alight').value = '2'; fire($('f-alight'), 'change');
+$('f-class').value = '0'; fire($('f-class'), 'change');
+await wait(120);
+const southbound = trainOptions();
+check(southbound.length === 5 && southbound.every((c) => parseInt(c.slice(1), 10) % 2 === 0),
+      '上海→南京 应只剩偶数车次（实际 ' + southbound.join(',') + '）');
+
+// 北京(5)→南京(2) 是站号递减，只应有奇数车次
+$('f-board').value = '5'; fire($('f-board'), 'change');
+await wait(120);
+const northbound = trainOptions();
+check(northbound.length === 5 && northbound.every((c) => parseInt(c.slice(1), 10) % 2 === 1),
+      '北京→南京 应只剩奇数车次（实际 ' + northbound.join(',') + '）');
+
+// 售罄的车次应从候选里消失：一等座只有 2 节车厢 × 8 座 = 16 个座位
+$('f-board').value = '0'; fire($('f-board'), 'change');
+$('f-alight').value = '2'; fire($('f-alight'), 'change');
+$('f-class').value = '1'; fire($('f-class'), 'change');
+await wait(120);
+check(trainOptions().includes('G2'), '区间与等级选好后 G2 应在候选中');
+
+for (let i = 0; i < 16; i++) {
+  $('f-id').value = String(7000 + i); fire($('f-id'), 'input');
+  $('f-name').value = 'F' + i;        fire($('f-name'), 'input');
+  $('f-train').value = 'G2';          fire($('f-train'), 'change');
+  fire($('sell-form'), 'submit');
+  await wait(25);
+}
+check(!trainOptions().includes('G2'),
+      'G2 一等座售罄后应从候选中消失（实际 ' + trainOptions().join(',') + '）');
+check(trainOptions().includes('G4'), 'G4 仍有票，应保留在候选中');
 
 console.log('统计页');
 fire(doc.querySelector('[data-view="stats"]'), 'click');

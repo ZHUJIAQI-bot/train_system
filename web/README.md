@@ -97,8 +97,8 @@ cd web/dist && py -m http.server 8000
 两层，都不需要浏览器：
 
 ```bash
-node web/test/smoke.mjs      # wasm 侧业务逻辑（67 项）
-node web/test/dom-smoke.mjs  # 界面层接线（23 项，需 jsdom）
+node web/test/smoke.mjs      # wasm 侧业务逻辑（74 项）
+node web/test/dom-smoke.mjs  # 界面层接线（35 项，需 jsdom）
 ```
 
 `smoke.mjs` 在 Node 里无头跑同一份 wasm，覆盖 JSON 转义、姓名字节边界、区段复用、
@@ -106,7 +106,8 @@ node web/test/dom-smoke.mjs  # 界面层接线（23 项，需 jsdom）
 完全测不出来的路径。
 
 `dom-smoke.mjs` 用 jsdom 加载真实页面，验证元素 id 对得上、售票/退票流程、
-标签页切换、语言切换、i18n 渲染。jsdom 是可选依赖，未安装时会自动跳过：
+旅客筛选、车次下拉的方向与余票过滤、标签页切换、语言切换、i18n 渲染。
+jsdom 是可选依赖，未安装时会自动跳过：
 
 ```bash
 npm install jsdom

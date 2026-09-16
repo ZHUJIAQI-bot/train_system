@@ -99,7 +99,12 @@
   <!-- ==================== 旅客列表 ==================== -->
   <section class="view" id="view-passengers">
     <h2 class="view-title" data-i18n="passTitle">旅客列表</h2>
-    <p class="view-hint" id="pass-hint"></p>
+
+    <div class="view-toolbar">
+      <input type="search" id="pass-search" class="search-input" autocomplete="off"
+             placeholder="按身份证后 4 位筛选" data-i18n-placeholder="searchPlaceholder">
+      <span class="view-hint" id="pass-hint"></span>
+    </div>
 
     <div class="table-wrap">
       <table class="data-table">
@@ -117,7 +122,8 @@
         </thead>
         <tbody id="pass-body"></tbody>
       </table>
-      <p class="empty" id="pass-empty" hidden data-i18n="passEmpty">暂无旅客。</p>
+      <!-- 文案由 JS 设置：空列表要区分「还没有旅客」和「筛选后没匹配上」 -->
+      <p class="empty" id="pass-empty" hidden>暂无旅客。</p>
     </div>
   </section>
 
