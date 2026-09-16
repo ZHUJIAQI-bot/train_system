@@ -1,6 +1,45 @@
 #include "train_model.h"
 #include <time.h>
 
+#if defined(__linux__)
+#include <unistd.h>     // readlink，用于取可执行文件所在目录
+#endif
+
+/* ---------------- 文件操作 ----------------
+   Windows 上必须用宽字符 API：MinGW 的 fopen/remove/rename 按 ANSI 代码页
+   （中文系统上是 GBK）解释路径字节，而源码里的路径字符串是 UTF-8。
+   只要项目所在目录含中文，文件就会打不开 —— 而且不报错，只是静默失败。
+   这里先把 UTF-8 路径转成 UTF-16 再调用。 */
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#include <windows.h>
+
+static FILE *open_file(const char *path, const char *mode) {
+    wchar_t wpath[1024], wmode[16];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) == 0) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, mode, -1, wmode, 16) == 0) return NULL;
+    return _wfopen(wpath, wmode);
+}
+
+static int remove_file(const char *path) {
+    wchar_t wpath[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 1024) == 0) return -1;
+    return _wremove(wpath);
+}
+
+static int rename_file(const char *from, const char *to) {
+    wchar_t wfrom[1024], wto[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, from, -1, wfrom, 1024) == 0) return -1;
+    if (MultiByteToWideChar(CP_UTF8, 0, to, -1, wto, 1024) == 0) return -1;
+    // 用 MoveFileExW 而不是 _wrename：既能覆盖已存在的目标文件，
+    // 也是原子的，省掉了「先删目标再改名」中间那段两边都不存在的窗口
+    return MoveFileExW(wfrom, wto, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+}
+#else
+static FILE *open_file(const char *path, const char *mode) { return fopen(path, mode); }
+static int remove_file(const char *path) { return remove(path); }
+static int rename_file(const char *from, const char *to) { return rename(from, to); }
+#endif
+
 /* ============================================================
    全局数据 —— 内存里的"存储"
    ============================================================ */
@@ -835,8 +874,8 @@ static void make_timestamped_name(const char *base, const char *tag,
 static void backup_rejected_file(const char *filename) {
     char backup[700];
     make_timestamped_name(filename, ".bad", backup, sizeof(backup));
-    remove(backup);
-    rename(filename, backup);
+    remove_file(backup);
+    rename_file(filename, backup);
 }
 
 static void free_node_chain(Node *first) {
@@ -899,14 +938,36 @@ static int dir_of(const char *file, char *out, size_t outsz) {
     return 1;
 }
 
-/* 存档路径不再写死成绝对路径：原来硬编码 "D:/train_system/passengers.dat"，
-   项目一挪目录或换台电脑就静默读不到数据、开出一张空表。
-   现在按优先级依次尝试，结果缓存在静态缓冲里：
-     1. 环境变量 TRAIN_DATA_FILE —— 便于手动指定或做多套数据
-     2. 编译 train_model.c 时记录的目录 —— 整个项目挪走也能跟上
-     3. 当前工作目录 —— 最后兜底
-   刻意不用平台 API（如 Windows 的 GetModuleFileName）：那会让本文件依赖
-   windows.h，而它同时要编译进 WebAssembly。 */
+// 取当前可执行文件所在目录，失败返回 0
+static int executable_dir(char *out, size_t outsz) {
+#if defined(_WIN32) && !defined(__EMSCRIPTEN__)
+    wchar_t wide_path[1024];
+    char utf8_path[1024];
+    if (GetModuleFileNameW(NULL, wide_path, 1024) == 0) return 0;
+    if (WideCharToMultiByte(CP_UTF8, 0, wide_path, -1, utf8_path,
+                            (int)sizeof(utf8_path), NULL, NULL) <= 0) {
+        return 0;
+    }
+    return dir_of(utf8_path, out, outsz);
+#elif defined(__linux__)
+    char link[1024];
+    ssize_t n = readlink("/proc/self/exe", link, sizeof(link) - 1);
+    if (n <= 0) return 0;
+    link[n] = '\0';
+    return dir_of(link, out, outsz);
+#else
+    (void)out; (void)outsz;
+    return 0;
+#endif
+}
+
+/* 存档路径按优先级查找，结果缓存在静态缓冲里：
+     1. 环境变量 TRAIN_DATA_FILE —— 便于手动指定或跑多套数据
+     2. 可执行文件所在目录 —— 发布出去的 exe 靠这条，挪到哪都能用
+     3. 编译 train_model.c 时记录的源码目录 —— 开发时用
+     4. 当前工作目录 —— 最后兜底
+   第 2 条必须在第 3 条之前：__FILE__ 记的是**编译时**的源码位置，
+   发布的 exe 拿到别人机器上，那个目录根本不存在，存档会静默失败。 */
 const char *default_data_file(void) {
     static char path[1024];
     static int resolved = 0;
@@ -916,6 +977,12 @@ const char *default_data_file(void) {
     const char *from_env = getenv("TRAIN_DATA_FILE");
     if (from_env != NULL && from_env[0] != '\0') {
         snprintf(path, sizeof(path), "%s", from_env);
+        return path;
+    }
+
+    char exe_dir[900];
+    if (executable_dir(exe_dir, sizeof(exe_dir))) {
+        snprintf(path, sizeof(path), "%s/passengers.dat", exe_dir);
         return path;
     }
 
@@ -981,7 +1048,7 @@ int purge_expired_passengers(const char *today, const char *archive_path,
     if (archive_path != NULL) {
         make_timestamped_name(archive_path, ".before-expire",
                               last_backup_path, sizeof(last_backup_path));
-        remove(last_backup_path);
+        remove_file(last_backup_path);
         // 备份失败不阻断清理，只是这次没有后悔药 —— 不该因为备份不了就不清过期数据
         if (!save_passengers(last_backup_path)) {
             last_backup_path[0] = '\0';
@@ -1001,7 +1068,7 @@ int save_passengers(const char *filename) {
     char tmp_path[600];
     snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", filename);
 
-    FILE *file = fopen(tmp_path, "wb");
+    FILE *file = open_file(tmp_path, "wb");
     if (file == NULL) return 0;
 
     int ok = 1;
@@ -1017,14 +1084,12 @@ int save_passengers(const char *filename) {
     if (fclose(file) != 0) ok = 0;
 
     if (!ok) {
-        remove(tmp_path);
+        remove_file(tmp_path);
         return 0;
     }
-    // Windows 的 rename 不覆盖已存在文件，故先删目标再改名。
-    // 该窗口极短（远小于整个写入过程），且坏文件已由备份路径兜底。
-    remove(filename);
-    if (rename(tmp_path, filename) != 0) {
-        remove(tmp_path);
+    // rename_file 会覆盖已存在的目标，不需要先删 —— 少一个两边都不存在的窗口
+    if (rename_file(tmp_path, filename) != 0) {
+        remove_file(tmp_path);
         return 0;
     }
     return 1;
@@ -1033,7 +1098,7 @@ int save_passengers(const char *filename) {
 // 读取 filename。全过程先读到临时数组并校验通过，最后才切换全局状态，
 // 因此「文件损坏」绝不会破坏内存中已有的数据。
 int load_passengers(const char *filename) {
-    FILE *file = fopen(filename, "rb");
+    FILE *file = open_file(filename, "rb");
     if (file == NULL) return LOAD_NO_FILE;
 
     long size = file_size_of(file);
