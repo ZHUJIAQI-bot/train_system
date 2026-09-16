@@ -512,3 +512,69 @@ EMSCRIPTEN_KEEPALIVE const char *api_diagnostic_today(void) {
     json_puts("}");
     return json_finish();
 }
+
+/* 运行总览：首页卡片用的一组汇总数字。
+   日期由 JS 传入 —— C 的 localtime 跨时区不可靠。 */
+EMSCRIPTEN_KEEPALIVE const char *api_dashboard(const char *today) {
+    int total_seats = 0;
+    for (int c = 1; c <= CARRIAGE_COUNT; c++) total_seats += car_seats[c];
+
+    json_reset();
+    json_puts("{\"ok\":true,\"code\":\"ok\",");
+    json_int_field("count", passenger_count());
+    json_puts(",");
+    json_int_field("totalFare", total_fare());
+    json_puts(",");
+    json_int_field("occupiedToday",
+                   (today != NULL && valid_date(today)) ? occupied_seat_total(today) : 0);
+    json_puts(",");
+    json_int_field("trainCount", TRAIN_COUNT);
+    json_puts(",");
+    json_int_field("stationCount", STATION_COUNT);
+    json_puts(",");
+    json_int_field("carriageCount", CARRIAGE_COUNT);
+    json_puts(",");
+    json_int_field("totalSeats", total_seats);
+    json_puts("}");
+    return json_finish();
+}
+
+/* 车次列表：各车次的方向、发车时间与余票。
+
+   余票只有在上车站、下车站、等级都选定、且车次方向与行程一致时才能算 ——
+   否则 seats 返回 -1，前端显示成「—」。 */
+EMSCRIPTEN_KEEPALIVE const char *api_timetable(const char *date,
+                                               int board, int alight,
+                                               int firstclass) {
+    char err[160];
+
+    json_reset();
+    json_puts("{\"ok\":true,\"code\":\"ok\",\"trains\":[");
+    for (int i = 1; i <= TRAIN_COUNT; i++) {
+        char code[6];
+        char depart[6];
+        int seats = -1;
+
+        snprintf(code, sizeof(code), "G%d", i);
+        train_depart_time(i, depart);
+        if (date != NULL &&
+            validate_trip(code, date, board, alight, firstclass, err, sizeof(err))) {
+            seats = seats_available(code, date, firstclass, board, alight);
+        }
+
+        if (i > 1) json_putc(',');
+        json_puts("{");
+        json_str_field("code", code);
+        json_puts(",");
+        json_int_field("number", i);
+        json_puts(",");
+        json_int_field("northbound", train_is_northbound(i));
+        json_puts(",");
+        json_str_field("depart", depart);
+        json_puts(",");
+        json_int_field("seats", seats);
+        json_puts("}");
+    }
+    json_puts("]}");
+    return json_finish();
+}

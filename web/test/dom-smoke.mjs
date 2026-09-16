@@ -197,6 +197,69 @@ await wait(200);
 check($('s-carriages').children.length === 2,
       '切到一等座应列出 2 个车厢（实际 ' + $('s-carriages').children.length + '）');
 
+console.log('运行总览');
+fire(doc.querySelector('[data-view="dashboard"]'), 'click');
+await wait(200);
+check($('dash-cards').children.length === 4,
+      '总览应有 4 张卡片（实际 ' + $('dash-cards').children.length + '）');
+check(/^\d+$/.test($('dash-cards').children[0].querySelector('.stat-value').textContent),
+      '卡片数值应为数字');
+
+console.log('车次列表');
+fire(doc.querySelector('[data-view="timetable"]'), 'click');
+await wait(250);
+const ttRows = () => $('timetable-body').children.length;
+check(ttRows() === 10, '车次列表应有 10 行（实际 ' + ttRows() + '）');
+// 默认行程是 上海(0)→南京(2)：偶数车次同向，奇数车次方向不符
+const seatCell = (i) => $('timetable-body').children[i].children[3].textContent;
+check(seatCell(1) !== '—', 'G2 方向匹配，应显示余票（实际 "' + seatCell(1) + '"）');
+check(seatCell(0) === '—', 'G1 方向不符，应显示 —（实际 "' + seatCell(0) + '"）');
+check(/^\d{2}:\d{2}$/.test($('timetable-body').children[0].children[2].textContent),
+      '发车时间格式应为 HH:MM');
+
+console.log('主题切换');
+const themeBtn = $('theme-toggle');
+const rootEl = doc.documentElement;
+check(!rootEl.hasAttribute('data-theme'), '默认跟随系统，不应写 data-theme');
+fire(themeBtn, 'click'); await wait(60);
+check(rootEl.getAttribute('data-theme') === 'light', '第一次点击应切到浅色');
+fire(themeBtn, 'click'); await wait(60);
+check(rootEl.getAttribute('data-theme') === 'dark', '第二次点击应切到深色');
+fire(themeBtn, 'click'); await wait(60);
+check(!rootEl.hasAttribute('data-theme'), '第三次点击应回到跟随系统');
+
+console.log('排序与分页');
+fire(doc.querySelector('[data-view="passengers"]'), 'click');
+await wait(150);
+check($('pass-body').children.length <= 15,
+      '单页不应超过 15 行（实际 ' + $('pass-body').children.length + '）');
+check(!$('pass-pager').hidden, '记录超过一页时应显示分页控件');
+check($('pass-body').children[0].children[0].dataset.label === '证件',
+      '手机卡片式布局依赖 data-label');
+
+// 按票价排序（数值比较，结果确定）
+const priceTh = doc.querySelector('.th-sort[data-sort-key="price"]');
+fire(priceTh, 'click'); await wait(80);
+check(priceTh.dataset.sort === 'asc', '首次点击表头应为升序');
+let prices = Array.from($('pass-body').children).map((r) => parseInt(r.children[6].textContent, 10));
+check(prices.every((v, i) => i === 0 || prices[i - 1] <= v), '按票价升序排列');
+
+fire(priceTh, 'click'); await wait(80);
+check(priceTh.dataset.sort === 'desc', '第二次点击应为降序');
+prices = Array.from($('pass-body').children).map((r) => parseInt(r.children[6].textContent, 10));
+check(prices.every((v, i) => i === 0 || prices[i - 1] >= v), '按票价降序排列');
+
+fire(priceTh, 'click'); await wait(80);
+check(!priceTh.dataset.sort, '第三次点击应清除排序标记');
+
+// 翻页
+fire($('page-next'), 'click'); await wait(80);
+check($('page-prev').disabled === false, '第二页时「上一页」应可用');
+check(/第 2 \//.test($('page-info').textContent),
+      '页码应变为第 2 页（实际 "' + $('page-info').textContent + '"）');
+fire($('page-prev'), 'click'); await wait(80);
+check(/第 1 \//.test($('page-info').textContent), '应能翻回第 1 页');
+
 console.log('语言切换');
 fire($('lang-toggle'), 'click');
 await wait(200);

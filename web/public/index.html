@@ -7,6 +7,18 @@
 <!-- 所有资源一律用相对路径：这是 GitHub Pages 的子路径项目页，
      任何以 / 开头的路径都会 404。 -->
 <link rel="stylesheet" href="./style.css">
+<script>
+  /* 主题必须在 CSS 加载前定好，否则会先闪一下浅色再切深色。
+     这里只读不写，真正的切换逻辑在 app.js。 */
+  (function () {
+    try {
+      var saved = localStorage.getItem('train.theme');
+      if (saved === 'light' || saved === 'dark') {
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+    } catch (e) { /* 隐私模式下 localStorage 可能不可用，忽略 */ }
+  })();
+</script>
 </head>
 <body>
 
@@ -28,19 +40,34 @@
     <span class="brand-main" data-i18n="brand">中国铁路</span>
     <span class="brand-sub" data-i18n="brandSub">旅客管理系统 · 网页版</span>
   </div>
-  <button id="lang-toggle" class="btn-ghost">English</button>
+  <div class="header-actions">
+    <button id="theme-toggle" class="btn-ghost"></button>
+    <button id="lang-toggle" class="btn-ghost">English</button>
+  </div>
 </header>
 
 <nav class="tabs" id="tabs">
-  <button class="tab is-active" data-view="sell" data-i18n="tabSell">售票</button>
+  <button class="tab is-active" data-view="dashboard" data-i18n="tabDashboard">运行总览</button>
+  <button class="tab" data-view="sell" data-i18n="tabSell">售票</button>
   <button class="tab" data-view="passengers" data-i18n="tabPassengers">旅客列表</button>
+  <button class="tab" data-view="timetable" data-i18n="tabTimetable">车次列表</button>
   <button class="tab" data-view="stats" data-i18n="tabStats">统计信息</button>
 </nav>
 
 <main class="content">
 
+  <!-- ==================== 运行总览 ==================== -->
+  <section class="view is-active" id="view-dashboard">
+    <h2 class="view-title" data-i18n="dashTitle">运行总览</h2>
+    <p class="view-hint" data-i18n="dashHint">当前售票情况与今日列车运行概况。</p>
+    <div class="card-grid" id="dash-cards"></div>
+
+    <h3 class="sub-title" data-i18n="quickActions">快捷操作</h3>
+    <button class="btn-primary" id="dash-new-ticket" data-i18n="newTicket">新建车票</button>
+  </section>
+
   <!-- ==================== 售票 ==================== -->
-  <section class="view is-active" id="view-sell">
+  <section class="view" id="view-sell">
     <h2 class="view-title" data-i18n="sellTitle">售票</h2>
     <p class="view-hint" data-i18n="sellHint">填写旅客信息，系统自动分配座位。</p>
 
@@ -110,13 +137,13 @@
       <table class="data-table">
         <thead>
           <tr>
-            <th data-i18n="thId">证件</th>
-            <th data-i18n="thName">姓名</th>
-            <th data-i18n="thDate">日期</th>
-            <th data-i18n="thTrain">车次</th>
+            <th class="th-sort" data-sort-key="id" data-i18n="thId">证件</th>
+            <th class="th-sort" data-sort-key="name" data-i18n="thName">姓名</th>
+            <th class="th-sort" data-sort-key="date" data-i18n="thDate">日期</th>
+            <th class="th-sort" data-sort-key="train" data-i18n="thTrain">车次</th>
             <th data-i18n="thRoute">行程</th>
-            <th data-i18n="thSeat">车厢/座位</th>
-            <th class="num" data-i18n="thPrice">票价</th>
+            <th class="th-sort" data-sort-key="seat" data-i18n="thSeat">车厢/座位</th>
+            <th class="th-sort num" data-sort-key="price" data-i18n="thPrice">票价</th>
             <th class="num" data-i18n="thAction">操作</th>
           </tr>
         </thead>
@@ -124,6 +151,56 @@
       </table>
       <!-- 文案由 JS 设置：空列表要区分「还没有旅客」和「筛选后没匹配上」 -->
       <p class="empty" id="pass-empty" hidden>暂无旅客。</p>
+    </div>
+
+    <div class="pager" id="pass-pager" hidden>
+      <button class="btn-ghost" id="page-prev" data-i18n="prevPage">上一页</button>
+      <span id="page-info"></span>
+      <button class="btn-ghost" id="page-next" data-i18n="nextPage">下一页</button>
+    </div>
+  </section>
+
+  <!-- ==================== 车次列表 ==================== -->
+  <section class="view" id="view-timetable">
+    <h2 class="view-title" data-i18n="timetableTitle">车次列表</h2>
+    <p class="view-hint" data-i18n="timetableHint">
+      全部固定车次与发车时间。选定上下车站和等级后可查看各车次余票。
+    </p>
+
+    <div class="stat-filters">
+      <label class="field field-inline">
+        <span data-i18n="fDate">出行日期</span>
+        <select id="t-date"></select>
+      </label>
+      <label class="field field-inline">
+        <span data-i18n="fBoard">上车站</span>
+        <select id="t-board"></select>
+      </label>
+      <label class="field field-inline">
+        <span data-i18n="fAlight">下车站</span>
+        <select id="t-alight"></select>
+      </label>
+      <label class="field field-inline">
+        <span data-i18n="fClass">座位等级</span>
+        <select id="t-class">
+          <option value="0" data-i18n="classSecond">二等座</option>
+          <option value="1" data-i18n="classFirst">一等座</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th data-i18n="thTrainNo">车次</th>
+            <th data-i18n="thDirection">方向</th>
+            <th data-i18n="thDepart">发车时间</th>
+            <th class="num" data-i18n="thSeatsLeft">余票</th>
+          </tr>
+        </thead>
+        <tbody id="timetable-body"></tbody>
+      </table>
     </div>
   </section>
 
@@ -150,7 +227,7 @@
       </label>
     </div>
 
-    <div class="stat-cards">
+    <div class="card-grid">
       <div class="stat-card">
         <span class="stat-label" data-i18n="statTotal">售票总数</span>
         <span class="stat-value" id="s-count">0</span>

@@ -96,6 +96,8 @@ async function freshModule() {
     load:      cw('api_load', 'string', ['string']),
     save:      cw('api_save', 'string', ['string']),
     expire:    cw('api_expire', 'string', ['string', 'string']),
+    dashboard: cw('api_dashboard', 'string', ['string']),
+    timetable: cw('api_timetable', 'string', ['string', 'number', 'number', 'number']),
     diagToday: cw('api_diagnostic_today', 'string', [])
   };
   return { Module, api };
@@ -382,6 +384,40 @@ async function main() {
   check(badRes.ok && badRes.removed === 0, '年份 1970 应被年份闸门挡住');
   check(badRes.reason && badRes.reason.length > 0, '被挡住时应给出原因');
   check(j(expBad.api.state()).count === 1, '被挡住时不应删除任何数据');
+
+  // ---- 10. 运行总览与车次列表 ----
+  console.log('运行总览与车次列表');
+  const board2 = await freshModule();
+
+  let dashData = j(board2.api.dashboard(today));
+  check(dashData.ok && dashData.count === 0, '空表时售票总数应为 0');
+  check(dashData.trainCount === 10, '车次总数应为 10');
+  check(dashData.stationCount === 6, '车站数应为 6');
+  check(dashData.carriageCount === 5, '车厢数应为 5');
+  check(dashData.totalSeats === 52, '总座位数应为 52（8+8+12+12+12）');
+
+  board2.api.sell('8001', 'A', tomorrow, 'G2', 0, 2, 0);
+  dashData = j(board2.api.dashboard(tomorrow));
+  check(dashData.count === 1, '售票后总数应为 1');
+  check(dashData.totalFare === 300, '票款应为 300');
+  check(dashData.occupiedToday === 1, '次日的已占用座位应为 1');
+  check(j(board2.api.dashboard(today)).occupiedToday === 0, '今天不应有占用');
+
+  // 车次列表：默认行程 上海(0)→南京(2)，只有偶数车次同向
+  let ttData = j(board2.api.timetable(tomorrow, 0, 2, 0));
+  check(ttData.ok && ttData.trains.length === 10, '车次列表应返回 10 趟车');
+  check(ttData.trains[0].code === 'G1' && ttData.trains[0].northbound === 1,
+        '首项应为 G1，且是北京→上海方向');
+  check(ttData.trains[0].depart === '06:00', 'G1 发车时间应为 06:00');
+  check(ttData.trains[0].seats === -1, 'G1 方向不符，余票应为 -1');
+  check(ttData.trains[1].code === 'G2' && ttData.trains[1].seats === 35,
+        'G2 售出一张后余票应为 35（实际 ' + ttData.trains[1].seats + '）');
+
+  ttData = j(board2.api.timetable(tomorrow, -1, -1, -1));
+  check(ttData.trains.every((x) => x.seats === -1), '未指定行程时余票应全为 -1');
+
+  ttData = j(board2.api.timetable(tomorrow, 0, 9, 0));      // 下车站越界
+  check(ttData.trains.every((x) => x.seats === -1), '行程参数非法时余票应全为 -1');
 
   // ---- 汇总 ----
   console.log('\n================================');
