@@ -295,13 +295,26 @@ static void draw_cover(void) {
     button((Rectangle){WINDOW_WIDTH - 190, 42, 150, 42}, tr("English", "Chinese"), false);
 }
 
+/* 按钮。文字水平和垂直都按实际测量结果居中，不写死偏移。
+
+   原来纵向是 (int)bounds.y + 13 这种硬编码 —— 那是按 48px 高的侧边栏按钮
+   调的，用到 24px 高的「退票」按钮上时，19 号字会顶出按钮下边缘。
+   现在字号随按钮高度收缩（上限 19，保证高按钮外观不变），位置按
+   MeasureTextEx 的结果算，任何尺寸的按钮都能自动居中。 */
 static bool button(Rectangle bounds, const char *label, bool selected) {
     Vector2 mouse = GetMousePosition();
     bool hovered = CheckCollisionPointRec(mouse, bounds);
     Color fill = selected ? CNR_DARK_RED : (hovered ? (Color){86, 151, 207, 255} : CNR_RED);
     DrawRectangleRounded(bounds, 0.08f, 6, fill);
-    int label_width = (int)MeasureTextEx(ui_font, label, 19, 0).x;
-    DrawText(label, (int)(bounds.x + (bounds.width - label_width) / 2), (int)bounds.y + 13, 19, WHITE);
+
+    float font_size = bounds.height * 0.55f;
+    if (font_size > 19.0f) font_size = 19.0f;
+
+    Vector2 label_size = MeasureTextEx(ui_font, label, font_size, 0);
+    DrawText(label,
+             (int)(bounds.x + (bounds.width - label_size.x) / 2),
+             (int)(bounds.y + (bounds.height - label_size.y) / 2),
+             (int)font_size, WHITE);
     return hovered && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
 }
 
